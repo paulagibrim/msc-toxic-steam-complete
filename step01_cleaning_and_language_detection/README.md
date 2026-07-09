@@ -62,7 +62,7 @@ Writes `all_users.parquet`, `null_summary_users.csv`, `sample_users.csv`,
 python run_clean_reviews.py \
   --input ../../steam-data/raw/reviews \
   --output-dir ../../steam-data/step01-output/reviews_by_lang \
-  --n-workers 8 --threads-per-worker 4 --memory-limit 4GB \
+  --n-workers 8 --threads-per-worker 4 --memory-limit 40GB \
   --local-directory ../../steam-data/step01-output/reviews_by_lang/dask-worker-space
 ```
 
@@ -80,10 +80,18 @@ Deduplicating by `review_url` is a Dask *shuffle* across ~97M raw rows -
 this is what crashed a 24GB machine before (see `clean_reviews.py`'s module
 docstring). `--n-workers`/`--threads-per-worker`/`--memory-limit` configure
 a `dask.distributed.Client` with real per-worker memory limits so Dask
-spills to disk under pressure instead of exhausting RAM. The defaults above
-(8 × 4 × 4GB = 32GB) assume a machine close to the 48-core/~37GB VM this
-was built for - adjust if the actual machine differs (leave a few GB of
-headroom for the OS/scheduler, don't allocate 100% of RAM to workers).
+spills to disk under pressure instead of exhausting RAM. `--memory-limit
+40GB` above (320GB total across 8 workers) is what actually worked on the
+48-core/430GB machine this was run on - a lower limit (tried first: 4GB,
+then 8GB per worker) repeatedly got workers killed mid-shuffle instead of
+just running slower, so don't be shy about going high on a machine with
+RAM to spare (leave some headroom for the OS/scheduler, don't allocate
+100% of RAM to workers).
+
+The script also calls `.persist()` right after language detection, so the
+dedup shuffle and the per-row `langdetect` pass only run once - without it,
+every later `len()`/`.compute()` call (row counts, language counts, the
+final `to_parquet()`) would silently redo both from scratch each time.
 
 Writes `reviews_cleaned.parquet/` (partitioned by `review_lang`),
 `sample_reviews.csv`, `reviews_report.json` (includes `languages_detected`

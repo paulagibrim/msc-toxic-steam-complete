@@ -15,8 +15,8 @@ clean_reviews.export_reviews's docstring.
 Usage:
     python run_clean_reviews.py \\
         --input ../../steam-data/raw/reviews \\
-        --output-dir ../../steam-data/processed/reviews_by_lang \\
-        --n-workers 8 --threads-per-worker 4 --memory-limit 4GB
+        --output-dir ../../steam-data/step01-output/reviews_by_lang \\
+        --n-workers 8 --threads-per-worker 4 --memory-limit 40GB
 
 Step order (through fix_types) matches
 dissertacao-steam/data_refactor/0-cleaning/03_clean_reviews.ipynb.
@@ -38,10 +38,24 @@ thresholds: spill at 70%, pause new work at 80%, terminate at 95% of
 memory_limit) instead of trying to hold everything in RAM until something
 breaks.
 
-Defaults below (8 workers x 4 threads x 4GB = 32GB) assume roughly a 40GB/
-48-core machine - override via the CLI flags for whatever machine this
+Defaults below (8 workers x 4 threads x 4GB = 32GB) are deliberately
+conservative - override via the CLI flags for whatever machine this
 actually runs on (leave some RAM headroom for the OS/scheduler itself,
-don't allocate all of it to workers).
+don't allocate all of it to workers). On the 48-core/430GB machine this
+was actually run on, `--memory-limit 40GB` (320GB total across 8 workers)
+was needed - the 4GB default repeatedly hit its cap and got workers killed
+mid-shuffle (see clean_reviews.detect_review_language and
+drop_duplicate_reviews - the dedup shuffle and the per-row langdetect call
+are both memory-hungry enough that a too-tight per-worker limit fails
+outright rather than just running slowly).
+
+A `df.persist()` right after language detection materializes the
+deduplicated, language-detected result once, in distributed memory -
+without it, every subsequent len()/compute() (rows_final, language_counts,
+and finally export_reviews's to_parquet) would silently redo the entire
+dedup shuffle and the langdetect pass over every row again each time, since
+Dask doesn't cache intermediate results across separate compute() calls on
+its own.
 
 Besides reviews_cleaned.parquet, writes (into --output-dir) everything the
 original notebook printed as cell output or logged to MLflow, minus MLflow
@@ -76,13 +90,21 @@ def parse_args():
         "--local-directory", type=Path, default=Path("./dask-worker-space"),
         help="Directory Dask workers use to spill data to disk under memory pressure",
     )
+    parser.add_argument(
+        "--n-partitions", type=int, default=None,
+        help="Repartition to this many partitions before language detection (default: "
+        "4 x n-workers x threads-per-worker). The raw reviews only come as ~25 files, so "
+        "without this, langdetect - the most parallelizable, CPU-heavy step - has at most "
+        "~25 chunks of work to hand out, leaving most workers idle regardless of how many "
+        "are configured.",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    from dask.distributed import Client
+    from dask.distributed import Client, progress
 
     args.local_directory.mkdir(parents=True, exist_ok=True)
     client = Client(
@@ -122,8 +144,34 @@ def main():
         rows_dropped_duplicates = rows_before_dedup - len(df)
         info(f"Dropped {rows_dropped_duplicates} duplicate row(s) by review_url")
 
+        n_partitions = args.n_partitions or (args.n_workers * args.threads_per_worker * 4)
+        partitions_before = df.npartitions
+        df = df.repartition(npartitions=n_partitions)
+        info(
+            f"Repartitioned from {partitions_before} to {df.npartitions} partition(s) before "
+            f"language detection - more, smaller chunks so every worker has something to do"
+        )
+
         df = cr.detect_review_language(df)
         info("Assigned review_lang from langdetect (Steam's declared language is ignored for this)")
+
+        # Without this, every len()/compute() below would re-trigger the
+        # whole graph from scratch - including the dedup shuffle AND
+        # langdetect over every row again each time (once for rows_final,
+        # again for language_counts, again inside export_reviews's
+        # to_parquet). persist() materializes the dedup+langdetect result
+        # once, in distributed memory, and everything downstream reuses it.
+        # persist() itself returns immediately (computation runs in the
+        # background across the cluster) - progress() blocks here and
+        # prints a live, updating text progress bar (% of tasks completed)
+        # until that background computation finishes, which is the only
+        # concrete way to see how far along the dedup+langdetect stretch
+        # is without opening the Dask dashboard.
+        info("Persisting the deduplicated, language-detected dataframe (dedup shuffle + langdetect) - progress:")
+        df = df.persist()
+        progress(df)
+        print()  # progress() doesn't print a trailing newline
+        info("Persist complete")
 
         rows_final = len(df)
         dtypes = {col: str(dtype) for col, dtype in df.dtypes.items()}
