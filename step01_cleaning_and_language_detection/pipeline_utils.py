@@ -56,18 +56,24 @@ def list_parquet_files(directory: Path) -> list:
     return parquet_files
 
 
-def read_parquet_dir(directory: Path, engine: str = "pandas"):
+def read_parquet_dir(directory: Path, engine: str = "pandas", blocksize=None):
     """Reads every *.parquet file in `directory` into a single dataframe.
 
     engine="pandas": loads eagerly (used for users, which fits in memory).
     engine="dask": builds a lazy Dask dataframe (used for reviews, too large
-    to load eagerly).
+    to load eagerly). `blocksize` caps how much data Dask bundles into one
+    read task - without it, Dask's own optimizer decides how many raw files
+    to fuse into a single task, and can pick a fusion large enough to
+    exceed a worker's memory_limit outright (observed: default fusion
+    caused workers to die reading, even with a generous per-worker memory
+    limit configured) - a cap makes each read task's size predictable
+    regardless of worker count/memory settings.
     """
     parquet_files = list_parquet_files(directory)
 
     if engine == "dask":
         import dask.dataframe as dd
-        return dd.read_parquet([str(f) for f in parquet_files])
+        return dd.read_parquet([str(f) for f in parquet_files], blocksize=blocksize)
 
     import pandas as pd
     dfs = []

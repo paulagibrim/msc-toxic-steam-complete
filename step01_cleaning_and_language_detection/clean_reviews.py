@@ -82,8 +82,8 @@ PT_MONTHS = {
 }
 
 
-def load_raw_reviews(reviews_raw_dir: Path):
-    return read_parquet_dir(reviews_raw_dir, engine="dask")
+def load_raw_reviews(reviews_raw_dir: Path, blocksize=None):
+    return read_parquet_dir(reviews_raw_dir, engine="dask", blocksize=blocksize)
 
 
 def drop_irrelevant_columns(df):

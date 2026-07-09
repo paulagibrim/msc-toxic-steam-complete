@@ -98,6 +98,14 @@ def parse_args():
         "~25 chunks of work to hand out, leaving most workers idle regardless of how many "
         "are configured.",
     )
+    parser.add_argument(
+        "--blocksize", default="256MB",
+        help="Caps how much data Dask bundles into a single raw-file read task (e.g. '256MB'). "
+        "Without this, Dask's own optimizer decides how many files to fuse into one read task, "
+        "and can pick a fusion large enough to exceed --memory-limit outright - observed workers "
+        "dying during the read itself, independent of the shuffle/langdetect steps. Pass 'none' "
+        "to disable capping and let Dask decide (not recommended - this is what failed before).",
+    )
     return parser.parse_args()
 
 
@@ -119,8 +127,11 @@ def main():
         f"{args.memory_limit} each"
     )
 
+    blocksize = None if args.blocksize.lower() == "none" else args.blocksize
+    info(f"Read blocksize cap: {blocksize}")
+
     try:
-        df = cr.load_raw_reviews(args.input)
+        df = cr.load_raw_reviews(args.input, blocksize=blocksize)
         columns_loaded = df.columns.tolist()
         info(f"Columns: {columns_loaded}")
 

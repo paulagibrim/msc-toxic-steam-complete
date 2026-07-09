@@ -62,7 +62,7 @@ Writes `all_users.parquet`, `null_summary_users.csv`, `sample_users.csv`,
 python run_clean_reviews.py \
   --input ../../steam-data/raw/reviews \
   --output-dir ../../steam-data/step01-output/reviews_by_lang \
-  --n-workers 8 --threads-per-worker 4 --memory-limit 40GB \
+  --n-workers 24 --threads-per-worker 2 --memory-limit 16GB --blocksize 256MB \
   --local-directory ../../steam-data/step01-output/reviews_by_lang/dask-worker-space
 ```
 
@@ -80,13 +80,28 @@ Deduplicating by `review_url` is a Dask *shuffle* across ~97M raw rows -
 this is what crashed a 24GB machine before (see `clean_reviews.py`'s module
 docstring). `--n-workers`/`--threads-per-worker`/`--memory-limit` configure
 a `dask.distributed.Client` with real per-worker memory limits so Dask
-spills to disk under pressure instead of exhausting RAM. `--memory-limit
-40GB` above (320GB total across 8 workers) is what actually worked on the
-48-core/430GB machine this was run on - a lower limit (tried first: 4GB,
-then 8GB per worker) repeatedly got workers killed mid-shuffle instead of
-just running slower, so don't be shy about going high on a machine with
-RAM to spare (leave some headroom for the OS/scheduler, don't allocate
-100% of RAM to workers).
+spills to disk under pressure instead of exhausting RAM - don't be shy
+about going high on a machine with RAM to spare (leave some headroom for
+the OS/scheduler, don't allocate 100% of RAM to workers). Two other things
+tuned in for the same reason:
+
+- `--blocksize 256MB` caps how much data gets bundled into a single raw-file
+  read task. Without it, Dask's own optimizer decides how many files to
+  fuse into one read, and picked a fusion large enough to exceed
+  `--memory-limit` outright on this project's data - workers died reading
+  the raw files, before the shuffle or langdetect even started.
+- `--n-partitions` (defaults to `4 x n-workers x threads-per-worker`)
+  repartitions right before language detection - the raw reviews only come
+  as ~25 files, so without repartitioning, `langdetect` (the most
+  parallelizable, CPU-heavy step) only ever has ~25 chunks to hand out,
+  leaving most workers idle no matter how many are configured.
+
+Also worth knowing: `langdetect` is pure Python and holds the GIL, so for
+that specific step, true parallelism comes from the *number of worker
+processes* (`--n-workers`), not threads - `--threads-per-worker` mostly
+helps the pandas/pyarrow-based steps, which release the GIL during their
+C-level work. That's why the recommended config above favors more workers
+with moderate memory each, over fewer workers with more memory each.
 
 The script also calls `.persist()` right after language detection, so the
 dedup shuffle and the per-row `langdetect` pass only run once - without it,
