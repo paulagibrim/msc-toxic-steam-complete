@@ -1,0 +1,4 @@
+pandas>=2.2
+pyarrow>=15
+langdetect>=1.0.9
+dask[dataframe,distributed]>=2024.1
