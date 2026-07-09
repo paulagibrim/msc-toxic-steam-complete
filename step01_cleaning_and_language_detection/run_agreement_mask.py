@@ -8,7 +8,7 @@ multi-million-row partition on disk.
 
 Usage:
     python run_agreement_mask.py \\
-        --input /Users/gibrim/Documents/dev/steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \\
+        --input ../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \\
         --lang pt --lang en
 
 `--input` is run_clean_reviews.py's output directory (the

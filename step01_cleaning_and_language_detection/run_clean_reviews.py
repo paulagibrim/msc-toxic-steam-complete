@@ -14,8 +14,8 @@ clean_reviews.export_reviews's docstring.
 
 Usage:
     python run_clean_reviews.py \\
-        --input /Users/gibrim/Documents/dev/steam-data/raw/reviews \\
-        --output-dir /Users/gibrim/Documents/dev/steam-data/processed/reviews_by_lang \\
+        --input ../../steam-data/raw/reviews \\
+        --output-dir ../../steam-data/processed/reviews_by_lang \\
         --n-workers 8 --threads-per-worker 4 --memory-limit 4GB
 
 Step order (through fix_types) matches

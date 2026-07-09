@@ -2,8 +2,8 @@
 
 Usage:
     python run_clean_games.py \\
-        --input /Users/gibrim/Documents/dev/steam-data/raw/games/todos_jogos.json \\
-        --output /Users/gibrim/Documents/dev/steam-data/processed/games/games.parquet
+        --input ../../steam-data/raw/games/todos_jogos.json \\
+        --output ../../steam-data/processed/games/games.parquet
 
 Step order matches dissertacao-steam/data_refactor/0-cleaning/01_clean_games.ipynb.
 Besides the cleaned games.parquet, writes (next to --output, i.e. in its

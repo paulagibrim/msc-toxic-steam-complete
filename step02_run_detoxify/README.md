@@ -39,6 +39,10 @@ together later would be a recurring cost for no benefit.
    `step01_cleaning_and_language_detection/` being present).
 2. Copy step01's output over too - specifically
    `steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet/`.
+   Keep `steam-data/` next to `msc-toxic-steam-complete/` (same parent
+   folder, wherever that ends up on this machine) - the commands below use
+   `../../steam-data/...`, relative to this folder, so nothing needs
+   editing per machine as long as that layout holds.
 3. Install dependencies:
 
    ```bash
@@ -52,8 +56,8 @@ together later would be a recurring cost for no benefit.
 
 ```bash
 python run_detoxify.py \
-  --input /Users/gibrim/Documents/dev/steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \
-  --output-dir /Users/gibrim/Documents/dev/steam-data/step02-output
+  --input ../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \
+  --output-dir ../../steam-data/step02-output
 ```
 
 - `--input` is step01's `reviews_cleaned.parquet` directory (the one

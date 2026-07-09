@@ -3,8 +3,8 @@ with Detoxify, keeping only `toxicity` (renamed `detoxify_score`).
 
 Usage:
     python run_detoxify.py \\
-        --input /Users/gibrim/Documents/dev/steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \\
-        --output-dir /Users/gibrim/Documents/dev/steam-data/step02-output
+        --input ../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \\
+        --output-dir ../../steam-data/step02-output
 
 Defaults to scoring both pt and en (pass --lang to override, repeatable).
 `--input` is step01's reviews_cleaned.parquet directory (contains the

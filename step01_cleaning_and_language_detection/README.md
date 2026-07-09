@@ -26,16 +26,20 @@ cleaning and the agreement check are light and can run anywhere.
    assumes its sibling `.py` files (`clean_reviews.py`, `pipeline_utils.py`,
    etc.) are importable from the current directory.
 
-All commands below use this Mac's paths as an example
-(`/Users/gibrim/Documents/dev/steam-data/...`) - replace `steam-data` with
-wherever you copied/mounted it on the remote machine.
+All commands below use `../../steam-data/...` - the data folder is always
+relative to the code: from this folder
+(`msc-toxic-steam-complete/step01_cleaning_and_language_detection/`), go up
+twice to leave `msc-toxic-steam-complete/` and into its sibling
+`steam-data/`. This works unchanged on any machine as long as
+`msc-toxic-steam-complete/` and `steam-data/` are copied/mounted next to
+each other (same parent folder) - no path needs editing per machine.
 
 ## 1. Clean games (light)
 
 ```bash
 python run_clean_games.py \
-  --input /Users/gibrim/Documents/dev/steam-data/raw/games/todos_jogos.json \
-  --output /Users/gibrim/Documents/dev/steam-data/step01-output/games/games.parquet
+  --input ../../steam-data/raw/games/todos_jogos.json \
+  --output ../../steam-data/step01-output/games/games.parquet
 ```
 
 Writes `games.parquet`, `null_summary_games.csv`, `sample_games.csv`,
@@ -45,8 +49,8 @@ Writes `games.parquet`, `null_summary_games.csv`, `sample_games.csv`,
 
 ```bash
 python run_clean_users.py \
-  --input /Users/gibrim/Documents/dev/steam-data/raw/users \
-  --output /Users/gibrim/Documents/dev/steam-data/step01-output/users/all_users.parquet
+  --input ../../steam-data/raw/users \
+  --output ../../steam-data/step01-output/users/all_users.parquet
 ```
 
 Writes `all_users.parquet`, `null_summary_users.csv`, `sample_users.csv`,
@@ -56,10 +60,10 @@ Writes `all_users.parquet`, `null_summary_users.csv`, `sample_users.csv`,
 
 ```bash
 python run_clean_reviews.py \
-  --input /Users/gibrim/Documents/dev/steam-data/raw/reviews \
-  --output-dir /Users/gibrim/Documents/dev/steam-data/step01-output/reviews_by_lang \
+  --input ../../steam-data/raw/reviews \
+  --output-dir ../../steam-data/step01-output/reviews_by_lang \
   --n-workers 8 --threads-per-worker 4 --memory-limit 4GB \
-  --local-directory /Users/gibrim/Documents/dev/steam-data/step01-output/reviews_by_lang/dask-worker-space
+  --local-directory ../../steam-data/step01-output/reviews_by_lang/dask-worker-space
 ```
 
 No `--lang` flag anymore - the `language` field bundled alongside the
@@ -97,15 +101,15 @@ step 3's output). Run once per language:
 
 ```bash
 python run_langdetect_revalidation.py \
-  --input /Users/gibrim/Documents/dev/steam-data/raw/reviews \
+  --input ../../steam-data/raw/reviews \
   --lang pt \
-  --output-dir /Users/gibrim/Documents/dev/steam-data/step01-output/language_detection \
+  --output-dir ../../steam-data/step01-output/language_detection \
   --n-jobs 48
 
 python run_langdetect_revalidation.py \
-  --input /Users/gibrim/Documents/dev/steam-data/raw/reviews \
+  --input ../../steam-data/raw/reviews \
   --lang en \
-  --output-dir /Users/gibrim/Documents/dev/steam-data/step01-output/language_detection \
+  --output-dir ../../steam-data/step01-output/language_detection \
   --n-jobs 48
 ```
 
@@ -130,7 +134,7 @@ call `agreement_mask.apply_agreement_mask(df, lang)` directly.
 
 ```bash
 python run_agreement_mask.py \
-  --input /Users/gibrim/Documents/dev/steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \
+  --input ../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \
   --lang pt --lang en
 ```
 

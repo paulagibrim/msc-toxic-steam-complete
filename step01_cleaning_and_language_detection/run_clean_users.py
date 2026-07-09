@@ -2,8 +2,8 @@
 
 Usage:
     python run_clean_users.py \\
-        --input /Users/gibrim/Documents/dev/steam-data/raw/users \\
-        --output /Users/gibrim/Documents/dev/steam-data/processed/users/all_users.parquet
+        --input ../../steam-data/raw/users \\
+        --output ../../steam-data/processed/users/all_users.parquet
 
 Step order matches dissertacao-steam/data_refactor/0-cleaning/02_clean_users.ipynb -
 note replace_missing_sentinels is defined in clean_users.py but was never

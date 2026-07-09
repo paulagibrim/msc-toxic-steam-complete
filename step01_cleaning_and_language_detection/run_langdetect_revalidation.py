@@ -4,7 +4,7 @@ cores, and saves a slim validation table + mismatch breakdown.
 
 Usage:
     python run_langdetect_revalidation.py \\
-        --input /Users/gibrim/Documents/dev/steam-data/raw/reviews \\
+        --input ../../steam-data/raw/reviews \\
         --lang pt --output-dir ./output --n-jobs 48
 
 Run once per language (pt, then en) - each is a separate process, so there's
