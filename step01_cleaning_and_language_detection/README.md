@@ -85,16 +85,24 @@ about going high on a machine with RAM to spare (leave some headroom for
 the OS/scheduler, don't allocate 100% of RAM to workers). Two other things
 tuned in for the same reason:
 
-- `--blocksize 256MB` caps how much data gets bundled into a single raw-file
-  read task. Without it, Dask's own optimizer decides how many files to
-  fuse into one read, and picked a fusion large enough to exceed
-  `--memory-limit` outright on this project's data - workers died reading
-  the raw files, before the shuffle or langdetect even started.
-- `--n-partitions` (defaults to `4 x n-workers x threads-per-worker`)
-  repartitions right before language detection - the raw reviews only come
-  as ~25 files, so without repartitioning, `langdetect` (the most
-  parallelizable, CPU-heavy step) only ever has ~25 chunks to hand out,
-  leaving most workers idle no matter how many are configured.
+`--blocksize 256MB` caps how much data gets bundled into a single raw-file
+read task. Without it, Dask's own optimizer decides how many files to fuse
+into one read, and picked a fusion large enough to exceed `--memory-limit`
+outright on this project's data - workers died reading the raw files,
+before the shuffle or langdetect even started.
+
+There's also an optional `--n-partitions` to repartition right before
+language detection, in case the raw ~25 files leave too few partitions for
+`langdetect` (the most parallelizable, CPU-heavy step) to spread across all
+workers - **it's off by default and shouldn't usually be needed**: the
+dedup shuffle already redistributes the data into a much larger, balanced
+partition count on its own (observed: 106+ partitions out of ~25 files in).
+An explicit `.repartition()` turned out to be its own shuffle in this Dask
+version too - not a free/local split - and crashed workers the same way an
+undersized `--memory-limit` does for the dedup shuffle. Only reach for it
+if the post-dedup partition count (logged every run) is genuinely too low
+for your worker count, and expect it to need the same memory headroom as
+the dedup shuffle.
 
 Also worth knowing: `langdetect` is pure Python and holds the GIL, so for
 that specific step, true parallelism comes from the *number of worker

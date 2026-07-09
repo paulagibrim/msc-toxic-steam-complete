@@ -92,11 +92,12 @@ def parse_args():
     )
     parser.add_argument(
         "--n-partitions", type=int, default=None,
-        help="Repartition to this many partitions before language detection (default: "
-        "4 x n-workers x threads-per-worker). The raw reviews only come as ~25 files, so "
-        "without this, langdetect - the most parallelizable, CPU-heavy step - has at most "
-        "~25 chunks of work to hand out, leaving most workers idle regardless of how many "
-        "are configured.",
+        help="Repartition to this many partitions before language detection. Off by default - "
+        "the dedup shuffle already redistributes into a much larger, balanced partition count "
+        "on its own (no need to force one). Only set this if you've confirmed the post-dedup "
+        "partition count (logged) is genuinely too low - repartition() is itself a shuffle in "
+        "this Dask version, not a free/local operation, and needs the same memory headroom as "
+        "the dedup shuffle to avoid worker deaths.",
     )
     parser.add_argument(
         "--blocksize", default="256MB",
@@ -155,13 +156,19 @@ def main():
         rows_dropped_duplicates = rows_before_dedup - len(df)
         info(f"Dropped {rows_dropped_duplicates} duplicate row(s) by review_url")
 
-        n_partitions = args.n_partitions or (args.n_workers * args.threads_per_worker * 4)
-        partitions_before = df.npartitions
-        df = df.repartition(npartitions=n_partitions)
-        info(
-            f"Repartitioned from {partitions_before} to {df.npartitions} partition(s) before "
-            f"language detection - more, smaller chunks so every worker has something to do"
-        )
+        # No repartition by default: drop_duplicate_reviews (a shuffle) already
+        # redistributes the data into a much larger, more balanced partition
+        # count on its own (observed: ~25 raw files in, 106+ partitions out) -
+        # an explicit .repartition() call turned out to be its own shuffle in
+        # this Dask version too, not a cheap local split, and crashed the same
+        # way the dedup shuffle almost did. Only pass --n-partitions if you've
+        # confirmed the post-dedup count is actually too low for your worker
+        # count - it's an extra shuffle, not a free operation.
+        info(f"Partitions after dedup: {df.npartitions}")
+        if args.n_partitions is not None:
+            partitions_before = df.npartitions
+            df = df.repartition(npartitions=args.n_partitions)
+            info(f"Repartitioned from {partitions_before} to {df.npartitions} partition(s) (--n-partitions set)")
 
         df = cr.detect_review_language(df)
         info("Assigned review_lang from langdetect (Steam's declared language is ignored for this)")
