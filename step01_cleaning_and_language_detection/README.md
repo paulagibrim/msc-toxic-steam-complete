@@ -227,24 +227,27 @@ Writes `language_validation_{lang}.parquet` and
 
 ## 6. Check langdetect/Perspective agreement (light)
 
-For pt and en, reports how many reviews in step 4's `review_lang=<lang>`
-partitions also have the Perspective-scrape-declared language
-(`perspective_declared_language`) agreeing - i.e. both sources say the same
-thing. This is a report only, not a filter that gets saved: the check is a
-plain `==` on a column already in the data (no model inference), cheap
-enough to apply on demand wherever it's needed instead of writing out a
-second copy of a multi-million-row partition (see `agreement_mask.py`'s
-module docstring). To actually use the filter in your own analysis code,
-call `agreement_mask.apply_agreement_mask(df, lang)` directly.
+For pt and en (default - pass `--lang` to override), reports and **saves**
+how many reviews in step 4's `review_lang=<lang>` partitions also have the
+Perspective-scrape-declared language (`perspective_declared_language`)
+agreeing - i.e. both sources say the same thing. The underlying *data* is
+never duplicated - the check is a plain `==` on a column already present
+(no model inference), cheap enough to apply on demand wherever it's needed
+instead of writing out a second copy of a multi-million-row partition (see
+`agreement_mask.py`'s module docstring). The *aggregate counts* themselves
+(a handful of numbers per language) are small enough to persist as a
+report. To apply the filter itself in your own analysis code, call
+`agreement_mask.apply_agreement_mask(df, lang)` directly.
 
 ```bash
 python run_agreement_mask.py \
   --input ../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \
-  --lang pt --lang en
+  --output ../../steam-data/step01-output/agreement_report.json
 ```
 
 `--input` is step 4's `reviews_cleaned.parquet` output directory (not the
-raw reviews).
+raw reviews). Writes `agreement_report.json` - `rows_total`, `rows_agree`,
+`rows_disagree`, `agree_pct` per language.
 
 ## Bringing results back
 

@@ -12,14 +12,18 @@ rows both sources agree on survive.
 
 The mask itself is a plain `==` on a column that's already there (no model
 inference, no extra computation) - cheap enough to apply on demand every
-time, so this module doesn't export a second copy of the data, same
-reasoning as toxicity_mask.py/language_revalidation.py's masks elsewhere in
-this project: duplicating a multi-million-row partition on disk to save a
-`==` comparison isn't a good trade.
+time, so this module doesn't export a second copy of the *data* (the
+multi-million-row partition), same reasoning as toxicity_mask.py/
+language_revalidation.py's masks elsewhere in this project. The aggregate
+*counts* (summarize_agreement/save_agreement_report below) are cheap by
+comparison - a handful of numbers per language, not a copy of the rows -
+so those are saved to disk as a small report.
 """
 from pathlib import Path
 
 import dask.dataframe as dd
+
+from pipeline_utils import info, save_summary
 
 
 def load_language_partition(reviews_cleaned_dir: Path, lang: str):
@@ -35,3 +39,29 @@ def apply_agreement_mask(df, lang: str):
     partition; this narrows it to rows Steam's raw `language` field agrees
     with too."""
     return df[df["perspective_declared_language"] == lang]
+
+
+def summarize_agreement(df, lang: str) -> dict:
+    """Computes agreement counts/percentage for one language partition,
+    without keeping the filtered rows around - just the numbers."""
+    rows_total = len(df)
+    rows_agree = len(apply_agreement_mask(df, lang))
+    rows_disagree = rows_total - rows_agree
+    agree_pct = 100 * rows_agree / rows_total if rows_total else 0.0
+
+    summary = {
+        "language": lang,
+        "rows_total": rows_total,
+        "rows_agree": rows_agree,
+        "rows_disagree": rows_disagree,
+        "agree_pct": round(agree_pct, 2),
+    }
+    info(
+        f"[{lang}] {rows_agree} of {rows_total} rows agree "
+        f"(langdetect AND Steam both say '{lang}') ({agree_pct:.2f}%)"
+    )
+    return summary
+
+
+def save_agreement_report(summaries: list, output_path: Path) -> Path:
+    return save_summary({"languages": summaries}, output_path)
