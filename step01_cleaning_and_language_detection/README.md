@@ -111,6 +111,43 @@ each stage, final partition count) next to the checkpoint.
 detection) needs retuning or crashes, you don't need to redo this - just
 re-run step 4 against the same checkpoint.
 
+### 3b. If the shuffle keeps failing: shuffle-free dedup
+
+In practice, the shuffle above proved unstable even after extensive
+tuning (memory_limit raised from 4GB up through 90GB, blocksize lowered
+to 64MB, threads_per_worker dropped to 1, comm timeouts raised to 120s,
+fewer/bigger workers) - a single worker exceeding its own `--memory-limit`
+during shuffle buffering gets killed and restarted by the nanny, which
+poisons the whole shuffle's state (`P2PConsistencyError`) and forces a
+full restart. This sometimes recovers, sometimes cascades into total
+failure - observed as late as 99% complete.
+
+`run_clean_reviews_dedup_noshuffle.py` produces the identical output
+(same checkpoint format, same columns) without ever invoking Dask's
+shuffle: every partition hashes its own rows' `review_url` into one of
+200 buckets and writes each group to its own subfolder (no cross-worker
+communication - can't be poisoned by another worker dying), then every
+bucket is deduplicated independently with plain single-process pandas
+(a `ProcessPoolExecutor`, no Dask cluster at all for this half) - safe
+because every row sharing a `review_url` is guaranteed to land in the
+same bucket.
+
+```bash
+python run_clean_reviews_dedup_noshuffle.py \
+  --input ../../steam-data/raw/reviews \
+  --output ../../steam-data/step01-output/reviews_deduped.parquet \
+  --n-workers 16 --threads-per-worker 1 --memory-limit 16GB --blocksize 64MB \
+  --local-directory ../../steam-data/step01-output/dask-worker-space-scatter
+```
+
+The scatter phase (writing to buckets) has no shuffle, so it can use many
+workers with modest memory each, same shape as step 4's language
+detection. The dedup-buckets phase runs after Dask's client closes, using
+every CPU core by default (`--n-jobs-dedup` to override). Writes the same
+`reviews_deduped.parquet/` checkpoint and `dedup_report.json` as the
+shuffle-based version - `run_detect_language.py` (step 4) doesn't need to
+know or care which one produced it.
+
 ## 4. Detect language — HEAVY
 
 ```bash

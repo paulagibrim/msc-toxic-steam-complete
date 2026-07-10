@@ -40,6 +40,10 @@ and is, for now, ignored entirely for this purpose. Steam's original field
 is kept under `perspective_declared_language`, for reference/comparison,
 but no longer drives which language folder a review ends up in.
 """
+import hashlib
+import os
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -153,8 +157,92 @@ def fix_types(df):
 def drop_duplicate_reviews(df):
     """A Dask shuffle (regroups rows across partitions by review_url) - see
     module docstring for why this needs a tuned distributed Client rather
-    than the default scheduler to run safely at this row count."""
+    than the default scheduler to run safely at this row count. In
+    practice this shuffle proved unstable even after extensive tuning
+    (worker memory-limit restarts poisoning the shuffle's global state,
+    see run_clean_reviews_dedup.py) - scatter_to_buckets/dedup_buckets
+    below is a shuffle-free alternative for the same result."""
     return df.drop_duplicates(subset=["review_url"])
+
+
+N_BUCKETS = 200
+
+
+def _review_url_bucket(url: str, n_buckets: int = N_BUCKETS) -> int:
+    """Assigns a review_url to one of n_buckets buckets via a stable hash.
+    Every row with the same review_url always lands in the same bucket
+    regardless of which partition/worker processes it, so deduplicating
+    each bucket independently is equivalent to deduplicating the whole
+    dataset - no Dask shuffle needed to guarantee that."""
+    return int(hashlib.md5(url.encode("utf-8")).hexdigest(), 16) % n_buckets
+
+
+def _write_partition_to_buckets(partition: pd.DataFrame, buckets_dir: Path, partition_id: int, n_buckets: int) -> int:
+    bucket_ids = partition["review_url"].map(lambda u: _review_url_bucket(u, n_buckets))
+    for bucket_id, group in partition.groupby(bucket_ids):
+        bucket_dir = buckets_dir / f"bucket={bucket_id}"
+        bucket_dir.mkdir(parents=True, exist_ok=True)
+        group.to_parquet(bucket_dir / f"part-{partition_id}.parquet", index=False, engine="pyarrow")
+    return len(partition)
+
+
+def scatter_to_buckets(df, buckets_dir: Path, n_buckets: int = N_BUCKETS):
+    """Shuffle-free alternative to drop_duplicate_reviews (phase 1 of 2):
+    splits every partition's rows into n_buckets groups by
+    hash(review_url) and writes each group to its own bucket subfolder.
+    Every partition writes only its own files, independently of every
+    other partition/worker - no cross-worker data movement at all, so
+    this can never trigger a Dask shuffle or be poisoned by another
+    worker dying mid-transfer. Must be followed by dedup_buckets (outside
+    of Dask) to actually remove duplicates within each bucket."""
+    buckets_dir.mkdir(parents=True, exist_ok=True)
+
+    def _write(partition, partition_info=None):
+        partition_id = partition_info["number"] if partition_info else 0
+        rows_written = _write_partition_to_buckets(partition, buckets_dir, partition_id, n_buckets)
+        return pd.DataFrame({"rows_written": [rows_written]})
+
+    meta = pd.DataFrame({"rows_written": pd.array([], dtype="int64")})
+    return df.map_partitions(_write, meta=meta)
+
+
+def _dedup_one_bucket(bucket_dir: Path, output_dir: Path) -> tuple:
+    files = sorted(bucket_dir.glob("*.parquet"))
+    combined = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+    rows_before = len(combined)
+    combined = combined.drop_duplicates(subset=["review_url"])
+    rows_after = len(combined)
+    combined.to_parquet(output_dir / f"{bucket_dir.name}.parquet", index=False, engine="pyarrow")
+    return bucket_dir.name, rows_before, rows_after
+
+
+def dedup_buckets(buckets_dir: Path, output_dir: Path, n_jobs: int = None) -> dict:
+    """Shuffle-free alternative to drop_duplicate_reviews (phase 2 of 2):
+    deduplicates each bucket independently, entirely outside of Dask
+    (plain ProcessPoolExecutor, one process per bucket). Every row
+    sharing a review_url is guaranteed to be inside the same bucket (see
+    _review_url_bucket), so a single-process pandas drop_duplicates per
+    bucket is equivalent to deduplicating the whole dataset - no
+    cross-bucket coordination needed."""
+    n_jobs = n_jobs or os.cpu_count()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    bucket_dirs = sorted(buckets_dir.glob("bucket=*"))
+
+    rows_before_total = 0
+    rows_after_total = 0
+    dedup_fn = partial(_dedup_one_bucket, output_dir=output_dir)
+    with ProcessPoolExecutor(max_workers=n_jobs) as executor:
+        for i, (name, before, after) in enumerate(executor.map(dedup_fn, bucket_dirs), start=1):
+            rows_before_total += before
+            rows_after_total += after
+            info(f"[{i}/{len(bucket_dirs)}] {name}: {before} -> {after} row(s)")
+
+    return {
+        "buckets": len(bucket_dirs),
+        "rows_before_dedup": rows_before_total,
+        "rows_final": rows_after_total,
+        "rows_dropped_duplicates": rows_before_total - rows_after_total,
+    }
 
 
 def export_deduped(df, output_path: Path) -> Path:
