@@ -4,29 +4,41 @@ Ported from dissertacao-steam/data_refactor/0-cleaning/clean_reviews.py -
 Dask-based, since the raw review volume (~97M rows) doesn't fit comfortably
 in memory with plain pandas.
 
-Two differences from where this was ported from:
-  - `drop_duplicate_reviews` is now actually called (see run_clean_reviews.py)
-    instead of being defined but skipped. In dissertacao-steam, deduplicating
-    ~73M rows by `review_url` is a Dask shuffle (regroups rows across
-    partitions by key, unlike every other step here, which stays within one
-    partition at a time) that ran for 28+ minutes and then silently killed
-    the kernel on a 24GB machine - deferred there for that reason. This
-    project targets a many-core, more-RAM machine specifically to run this
-    step; run_clean_reviews.py configures a dask.distributed.Client with
-    explicit per-worker memory limits and disk-spilling so the shuffle has
-    somewhere to go instead of exhausting RAM outright, rather than assuming
-    a bigger machine alone fixes it.
-  - `review_lang` (the column export_reviews partitions/filters by) is no
-    longer Steam's own declared `language` field - per explicit user
-    decision, that field is untrustworthy (see langdetect_revalidation.py's
-    module docstring: manual inspection found genuinely English reviews
-    filed under Steam's "pt" label) and is, for now, ignored entirely for
-    this purpose. `detect_review_language` overwrites `review_lang` with
-    langdetect's own guess instead, computed via `map_partitions` (so Dask's
-    own worker pool parallelizes it - no separate multiprocessing layer, no
-    join against a precomputed table). Steam's original field is kept under
-    `perspective_declared_language`, for reference/comparison, but no longer
-    drives which language folder a review ends up in.
+Split across two orchestrating scripts, not one, because the two expensive
+steps here want opposite-shaped Dask clusters and mixing them in one Client
+config was the source of a lot of instability (worker OOM-restarts, then
+inter-worker connection timeouts, depending on which knob got tuned):
+
+  - `drop_duplicate_reviews` (run_clean_reviews_dedup.py) is a Dask
+    *shuffle* - every worker exchanges data with every other worker
+    (~n_workers^2 connections during the transfer phase). This wants FEW
+    workers with LOTS of memory each - fewer workers means less
+    all-to-all connection overhead, and more memory per worker survives
+    the shuffle's buffering needs. In dissertacao-steam, this step ran for
+    28+ minutes and then silently killed the kernel on a 24GB machine -
+    deferred there for that reason; this project targets a many-core,
+    more-RAM machine specifically to run it, with an explicit
+    dask.distributed.Client (real per-worker memory limits + disk-spilling)
+    instead of assuming a bigger machine alone fixes it.
+  - `detect_review_language` (run_detect_language.py) is pure-Python,
+    CPU-bound, per-row work via `map_partitions` - no shuffle, no
+    cross-worker communication at all. This wants MANY worker *processes*
+    (langdetect holds the GIL, so real parallelism comes from process
+    count, not threads) - and doesn't need much memory per worker, since
+    there's no shuffle to buffer.
+
+Splitting into two scripts also means the (expensive, multi-minute) dedup
+shuffle only ever runs once, checkpointed to disk by
+run_clean_reviews_dedup.py's export_deduped - if language detection needs
+retuning or crashes, the dedup step never needs to be redone.
+
+`review_lang` (the column export_reviews partitions by) is not Steam's own
+declared `language` field - per explicit user decision, that field is
+untrustworthy (see langdetect_revalidation.py's module docstring: manual
+inspection found genuinely English reviews filed under Steam's "pt" label)
+and is, for now, ignored entirely for this purpose. Steam's original field
+is kept under `perspective_declared_language`, for reference/comparison,
+but no longer drives which language folder a review ends up in.
 """
 from pathlib import Path
 
@@ -143,6 +155,28 @@ def drop_duplicate_reviews(df):
     module docstring for why this needs a tuned distributed Client rather
     than the default scheduler to run safely at this row count."""
     return df.drop_duplicates(subset=["review_url"])
+
+
+def export_deduped(df, output_path: Path) -> Path:
+    """Stage 1's checkpoint: the cleaned+deduped reviews, written to disk
+    before language detection ever runs - not partitioned by review_lang
+    yet (that only exists after stage 2). Whatever the dedup shuffle
+    naturally settles on as the partition count is what gets written, one
+    file per partition, same as any other Dask to_parquet call without
+    partition_on."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(output_path, write_index=False, engine="pyarrow")
+    info(f"Exported deduplicated checkpoint to: {output_path}")
+    return output_path
+
+
+def load_deduped_reviews(path: Path, blocksize=None):
+    """Reads stage 1's checkpoint (run_clean_reviews_dedup.py's
+    export_deduped output) - already cleaned and deduplicated, not yet
+    language-tagged. A plain partitioned read, not a shuffle, so this is
+    safe to load with many workers configured."""
+    import dask.dataframe as dd
+    return dd.read_parquet(str(path), blocksize=blocksize)
 
 
 def _detect_language_partition(partition: pd.DataFrame) -> pd.DataFrame:

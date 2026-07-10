@@ -55,6 +55,16 @@ DetectorFactory.seed = 0
 # UNDETERMINED_LABEL without even calling the model.
 MIN_ALPHA_LENGTH = 20
 
+# Raw text is truncated to this many characters before cleaning/detection -
+# langdetect doesn't need a whole review to guess its language, just enough
+# real content, and without a cap a handful of unusually long reviews (some
+# Steam reviews run to thousands of characters, especially ones padded with
+# ASCII art) can make a handful of tasks take far longer than the rest,
+# stalling overall progress on a few stragglers even though nothing has
+# actually failed. Matches the same idea as toxicity_scoring.py/
+# detoxify_scoring.py's MAX_CHARS, just for a different model.
+MAX_CHARS = 2000
+
 # Rows per batch when reading each raw file - keeps only one batch of
 # review text in memory at a time (these raw files can be large).
 BATCH_SIZE = 500_000
@@ -80,11 +90,13 @@ def clean_for_detection(text) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def identify_language_langdetect(text, min_alpha_length: int = MIN_ALPHA_LENGTH):
+def identify_language_langdetect(text, min_alpha_length: int = MIN_ALPHA_LENGTH, max_chars: int = MAX_CHARS):
     """Detects the language of a single piece of text via langdetect.
     Returns a (language_code, confidence) tuple - UNDETERMINED_LABEL if
     there isn't enough real alphabetic content to trust a guess, or if
     langdetect itself can't find enough signal (LangDetectException)."""
+    if isinstance(text, str):
+        text = text[:max_chars]
     cleaned = clean_for_detection(text)
     if len(cleaned) < min_alpha_length:
         return UNDETERMINED_LABEL, 0.0
