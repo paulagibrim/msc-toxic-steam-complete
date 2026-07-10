@@ -1,0 +1,145 @@
+# ==============================================================================
+# BERTopic Pipeline — Configuration File (English)
+# ==============================================================================
+# All paths are relative to this folder (step03_bertopic/), so this project
+# can be copied to any machine as long as steam-data/ stays its sibling
+# (see msc-toxic-steam-complete's top-level convention).
+# This is the ONLY file you need to edit to configure the English run.
+# Never modify src/ files for configuration changes.
+#
+# Execution order:
+#   python run/01_clean.py --config config_en.yaml [--resume]
+#   python run/02_embed.py --config config_en.yaml
+#   python run/03_search.py --config config_en.yaml [--resume]
+#   python run/04_stability.py --config config_en.yaml
+#   python run/05_train.py --config config_en.yaml
+#   python run/06_infer.py --config config_en.yaml [--resume]
+#   python run/07_export.py --config config_en.yaml
+
+seed: 42
+
+# ------------------------------------------------------------------------------
+# File Paths  (all relative to step03_bertopic/)
+# ------------------------------------------------------------------------------
+paths:
+  # Input: step02_run_detoxify's output for this language
+  detoxify_data_dir: "../../steam-data/step02-output/review_lang=en"
+
+  # Stage 1 output: cleaned parquet files
+  cleaned_data_dir: "../../steam-data/step03-output/en/cleaned"
+
+  # Stage 2 output: embeddings and PCA model
+  embeddings_dir: "../../steam-data/step03-output/en/embeddings"
+
+  # Stage 3/5 output: saved BERTopic models
+  models_dir: "../../steam-data/step03-output/en/models"
+
+  # Stage 4 output: stability analysis reports
+  stability_dir: "../../steam-data/step03-output/en/stability"
+
+  # Stage 6/7 output: final classified dataset and topic tables
+  results_dir: "../../steam-data/step03-output/en/results"
+
+  # MLflow tracking directory
+  mlruns_dir: "../../steam-data/step03-output/en/mlruns"
+
+  # Optuna SQLite database — enables resuming an interrupted search
+  optuna_db: "../../steam-data/step03-output/en/optuna/study.db"
+
+  # JSON file written by Stage 3 with the best hyperparameters found
+  best_params: "../../steam-data/step03-output/en/optuna/best_params.json"
+
+  # Fitted PCA model persisted with joblib (applied consistently in every stage)
+  pca_model: "../../steam-data/step03-output/en/embeddings/pca_model.joblib"
+
+# ------------------------------------------------------------------------------
+# Toxicity Labelling  (applied in Stage 1)
+# Same union rule and thresholds as dissertacao-steam's toxicity_mask.py:
+# a review counts as toxic if EITHER model's threshold is met.
+# ------------------------------------------------------------------------------
+data:
+  toxicity_threshold:
+    # Perspective API: mark as toxic when score >= this value
+    perspective_score: 0.7
+    # Detoxify: mark as toxic when score >= this value
+    detoxify_score: 0.9
+
+  # Name of the cleaned text column consumed by all downstream stages
+  text_column: "review_text_clean"
+
+  # Language used to select NLTK stop words.
+  language: "english"
+
+  # Short code matching review_lang=<code> / perspective_declared_language
+  # values in step02's output - used by Stage 1 to double-check every row
+  # actually has langdetect and Perspective agreeing (see text_cleaning.py).
+  lang_code: "en"
+
+# ------------------------------------------------------------------------------
+# Embedding Model  (Stage 2 and inference inside Stage 6)
+# ------------------------------------------------------------------------------
+embedding:
+  # Sentence-Transformers model used to encode texts into dense vectors.
+  # CRITICAL: this value must remain identical across all stages.
+  model_name: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+  # Texts encoded per forward pass. Reduce if CUDA OOM.
+  batch_size: 2048
+
+  # Normalize embedding vectors to unit length before PCA/UMAP.
+  normalize_embeddings: true
+
+  # PCA reduces embedding dimensionality before UMAP.
+  # Recommended range: 30–100. Set to null to skip PCA entirely.
+  pca_components: 50
+
+# ------------------------------------------------------------------------------
+# Hyperparameter Search — Optuna  (Stage 3)
+# ------------------------------------------------------------------------------
+optuna:
+  n_trials: 60
+  # MUST stay at 1: UMAP with n_jobs=1 is required for reproducibility.
+  n_jobs: 1
+  optuna_sample_size: 100000
+  coherence_metric: "c_npmi"
+  top_n_words: 10
+  coherence_weight: 1.0
+  study_name: "bertopic_steam_en"
+  search_space:
+    umap:
+      n_neighbors: [5, 50]
+      n_components: [5, 15]
+      min_dist: [0.0, 0.5]
+    hdbscan:
+      min_cluster_size: [100, 3000]
+      min_samples: [1, 20]
+
+# ------------------------------------------------------------------------------
+# Stability Analysis  (Stage 4)
+# ------------------------------------------------------------------------------
+stability:
+  sample_sizes: [100000, 200000, 300000, 400000]
+  stability_threshold: 0.85
+  top_n_topics_for_comparison: 10
+
+# ------------------------------------------------------------------------------
+# Final Training  (Stage 5) — fallback defaults, overridden by best_params.json
+# ------------------------------------------------------------------------------
+training:
+  umap:
+    n_neighbors: 15
+    n_components: 10
+    min_dist: 0.1
+  hdbscan:
+    min_cluster_size: 300
+    min_samples: 5
+
+# ------------------------------------------------------------------------------
+# Extra domain-specific stop words added ON TOP of the NLTK list (Stage 1).
+# ------------------------------------------------------------------------------
+stop_words:
+  - game
+  - steam
+  - play
+  - playing
+  - games
