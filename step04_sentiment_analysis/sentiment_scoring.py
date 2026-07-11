@@ -55,6 +55,27 @@ def clean_review_text(text):
     return text.strip()
 
 
+def load_score_cache(old_output_dir: Path, lang: str) -> dict:
+    """Builds a review_url -> sentiment_score lookup from an already-scored
+    step04 output directory - reused so re-scoring after an upstream fix
+    (e.g. step01's language-detection fix, which changes which file/
+    partition a review lands in but not its text or score) doesn't re-run
+    the model on reviews already scored. Returns {} if the directory
+    doesn't exist."""
+    partition_dir = old_output_dir / f"review_lang={lang}"
+    if not partition_dir.exists():
+        info(f"No cache directory found at {partition_dir} - starting with an empty cache")
+        return {}
+    files = list_parquet_files(partition_dir)
+    if not files:
+        return {}
+    frames = [pd.read_parquet(f, columns=["review_url", "sentiment_score"]) for f in files]
+    combined = pd.concat(frames, ignore_index=True)
+    cache = dict(zip(combined["review_url"], combined["sentiment_score"]))
+    info(f"[{lang}] Loaded {len(cache)} cached score(s) from {old_output_dir}")
+    return cache
+
+
 def load_sentiment_model(device=None):
     import torch
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -99,17 +120,22 @@ def score_file(
     device,
     batch_size: int = BATCH_SIZE,
     max_chars: int = MAX_CHARS,
+    cache: dict = None,
 ) -> Path:
     """Scores one review_lang=<lang> file, writing every column already in
     the file plus the new `sentiment_score` to `output_dir` under the same
-    filename. Skips (resumes) if the output file already exists."""
+    filename. Skips (resumes) if the output file already exists.
+
+    If `cache` (a review_url -> sentiment_score dict, see load_score_cache)
+    is given, rows whose review_url is already in it reuse that score
+    instead of running the model again."""
     output_path = output_dir / file_path.name
     if output_path.exists():
         info(f"Skipping {file_path.name} (already scored)")
         return output_path
 
     warn_if_not_materialized(file_path)
-    df = pd.read_parquet(file_path)
+    df = pd.read_parquet(file_path).reset_index(drop=True)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if df.empty:
@@ -118,38 +144,61 @@ def score_file(
         df.to_parquet(output_path, engine="pyarrow", index=False)
         return output_path
 
-    texts = df["review_text"].apply(clean_review_text).fillna("").astype(str).str.slice(0, max_chars).tolist()
-    scores = []
+    cache = cache or {}
+    cached_mask = df["review_url"].isin(cache)
+    to_score_idx = df.index[~cached_mask]
+    final_scores = [cache.get(url) for url in df["review_url"]]
 
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i + batch_size]
-        try:
-            scores.extend(_score_batch(batch, tokenizer, model, device))
-        except Exception as e:
-            error(f"Batch starting at row {i} failed: {e}")
-            scores.extend([FAILED_SCORE_SENTINEL] * len(batch))
-        if device.type == "mps":
-            import torch
-            torch.mps.empty_cache()
-        elif device.type == "cuda":
-            import torch
-            torch.cuda.empty_cache()
+    if cached_mask.any():
+        info(f"{file_path.name}: reusing {int(cached_mask.sum())} cached score(s), scoring {len(to_score_idx)} new row(s)")
 
-    df["sentiment_score"] = scores
+    if len(to_score_idx) > 0:
+        texts = (
+            df.loc[to_score_idx, "review_text"]
+            .apply(clean_review_text).fillna("").astype(str).str.slice(0, max_chars).tolist()
+        )
+        new_scores = []
+
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            try:
+                new_scores.extend(_score_batch(batch, tokenizer, model, device))
+            except Exception as e:
+                error(f"Batch starting at row {i} failed: {e}")
+                new_scores.extend([FAILED_SCORE_SENTINEL] * len(batch))
+            if device.type == "mps":
+                import torch
+                torch.mps.empty_cache()
+            elif device.type == "cuda":
+                import torch
+                torch.cuda.empty_cache()
+
+        for pos, idx in enumerate(to_score_idx):
+            final_scores[idx] = new_scores[pos]
+
+    df["sentiment_score"] = final_scores
     df.to_parquet(output_path, engine="pyarrow", index=False)
-    info(f"Scored {len(texts)} review(s) in {file_path.name} -> {output_path}")
+    info(f"Scored {file_path.name} ({len(to_score_idx)} new, {len(df) - len(to_score_idx)} cached) -> {output_path}")
 
     import gc
-    del df, texts, scores
+    del df, final_scores
     gc.collect()
     return output_path
 
 
-def run_sentiment_for_language(reviews_dir: Path, output_dir: Path, lang: str, device=None) -> list:
+def run_sentiment_for_language(
+    reviews_dir: Path, output_dir: Path, lang: str, device=None, cache_from: Path = None
+) -> list:
     """Scores every file in review_lang=<lang>, resuming per-file. A
-    failure on one file is logged and skipped rather than aborting the run."""
+    failure on one file is logged and skipped rather than aborting the run.
+
+    cache_from: optional path to an already-scored step04 output directory
+    (see load_score_cache) - reused so re-scoring after an upstream fix
+    doesn't re-run the model on reviews it already scored."""
     partition_dir = reviews_dir / f"review_lang={lang}"
     files = list_parquet_files(partition_dir)
+
+    cache = load_score_cache(cache_from, lang) if cache_from else {}
 
     tokenizer, model, device = load_sentiment_model(device)
     info(f"[{lang}] Sentiment model loaded on device: {device}")
@@ -158,7 +207,7 @@ def run_sentiment_for_language(reviews_dir: Path, output_dir: Path, lang: str, d
     for i, f in enumerate(files, start=1):
         info(f"[{lang}] [{i}/{len(files)}] {f.name}")
         try:
-            output_paths.append(score_file(f, output_dir, tokenizer, model, device))
+            output_paths.append(score_file(f, output_dir, tokenizer, model, device, cache=cache))
         except Exception as e:
             error(f"[{lang}] Fatal error on {f.name}: {e} - skipping to next file")
             continue
