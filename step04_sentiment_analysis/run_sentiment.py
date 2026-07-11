@@ -1,0 +1,62 @@
+"""CLI for sentiment_scoring.py - scores step02's pt/en reviews with
+nlptown/bert-base-multilingual-uncased-sentiment, adding a continuous
+`sentiment_score` (expected star rating, 1.0-5.0).
+
+Usage:
+    python run_sentiment.py \\
+        --input ../../steam-data/step02-output \\
+        --output-dir ../../steam-data/step04-output
+
+Defaults to scoring both pt and en (pass --lang to override, repeatable).
+`--input` is step02's output directory (contains the review_lang=<lang>
+subfolders). Output goes to --output-dir/review_lang=<lang>/ (same
+filenames as the input files, so each is independently resumable).
+
+Device auto-detects cuda > mps > cpu; pass --device to force one (e.g.
+--device cuda:0 to pin a specific GPU on a multi-GPU machine).
+"""
+import argparse
+from pathlib import Path
+
+import sentiment_scoring as ss
+from pipeline_utils import info
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Scores step02's pt/en reviews with a multilingual sentiment model "
+        "(continuous sentiment_score, 1.0-5.0)."
+    )
+    parser.add_argument(
+        "--input", required=True, type=Path,
+        help="Path to step02's output directory (contains review_lang=<lang> subfolders)",
+    )
+    parser.add_argument("--output-dir", required=True, type=Path, help="Directory to write scored output to")
+    parser.add_argument(
+        "--lang", action="append", dest="languages", default=None,
+        help="Language to score (repeat for multiple). Defaults to both pt and en.",
+    )
+    parser.add_argument(
+        "--device", default=None,
+        help="Force a device (e.g. 'cuda', 'cuda:0', 'mps', 'cpu'). Default: auto-detect.",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    languages = args.languages or ["pt", "en"]
+
+    device = None
+    if args.device is not None:
+        import torch
+        device = torch.device(args.device)
+
+    for lang in languages:
+        output_dir = args.output_dir / f"review_lang={lang}"
+        ss.run_sentiment_for_language(args.input, output_dir, lang, device=device)
+        info(f"[{lang}] done -> {output_dir}")
+
+
+if __name__ == "__main__":
+    main()
