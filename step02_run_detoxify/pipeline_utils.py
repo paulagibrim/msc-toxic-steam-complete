@@ -1,6 +1,7 @@
 """Minimal logging/IO helpers - same as step01_cleaning_and_language_detection's,
 copied here so this folder stays independently copyable to whatever machine
 runs Detoxify (a GPU machine, likely a different one than step01's)."""
+import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -42,3 +43,11 @@ def list_parquet_files(directory: Path) -> list:
     for f in parquet_files:
         warn_if_not_materialized(f)
     return parquet_files
+
+
+def save_summary(summary: dict, output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(summary, f, indent=2, default=str)
+    info(f"Saved run summary to: {output_path}")
+    return output_path

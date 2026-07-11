@@ -105,3 +105,26 @@ Each output file is written only after that one input file finishes
 scoring. If the run stops partway through, just re-run the same command -
 `score_file` skips any file whose output already exists, so already-scored
 files aren't reprocessed.
+
+## Checking score validity (light)
+
+Reports and saves how many rows have a valid `perspective_score`/
+`detoxify_score` (both inside `[0, 1]`) vs. an invalid/sentinel value -
+Detoxify writes `-1.0` when a batch fails to score (see
+`detoxify_scoring.py`), and this is the main thing that shows up here.
+Same report-only pattern as step01's `agreement_mask.py`: the check itself
+is a cheap `.between(0, 1)` on columns already present, so only the small
+aggregate counts are saved, not a filtered copy of the data.
+
+```bash
+python run_validity_mask.py \
+  --input ../../steam-data/step02-output \
+  --output ../../steam-data/step02-output/validity_report.json
+```
+
+`--input` is this step's own output directory (the scored data
+`run_detoxify.py` already produced). Writes `validity_report.json` -
+`rows_total`, `rows_valid`, `rows_invalid_either`,
+`rows_invalid_perspective`, `rows_invalid_detoxify`, `valid_pct` per
+language. To apply the mask itself in your own analysis code, call
+`validity_mask.apply_validity_mask(df)` directly.
