@@ -100,7 +100,14 @@ optuna:
   n_trials: 60
   # MUST stay at 1: UMAP with n_jobs=1 is required for reproducibility.
   n_jobs: 1
-  optuna_sample_size: 100000
+  # Fraction of the toxic corpus sampled per trial - NOT a fixed count.
+  # A fraction keeps search coverage proportionally identical between pt
+  # and en regardless of each corpus's absolute size (a fixed N represents
+  # a different share of each language's total, which would make the two
+  # language pipelines methodologically incomparable). 10% matches the
+  # smallest rung of stability.sample_fractions below, so the hyperparameters
+  # found here are evaluated at a sample size stability analysis also tests.
+  optuna_sample_fraction: 0.1
   coherence_metric: "c_npmi"
   top_n_words: 10
   coherence_weight: 1.0
@@ -118,7 +125,11 @@ optuna:
 # Stability Analysis  (Stage 4)
 # ------------------------------------------------------------------------------
 stability:
-  sample_sizes: [100000, 200000, 300000, 400000]
+  # Same 1:2:3:4 ladder as the original absolute-count design (100k/200k/
+  # 300k/400k), expressed as fractions of the corpus so it scales the same
+  # way across languages. Falls back to the full dataset (100%) if no
+  # consecutive pair stabilises within this range.
+  sample_fractions: [0.1, 0.2, 0.3, 0.4]
   stability_threshold: 0.85
   top_n_topics_for_comparison: 10
 

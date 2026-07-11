@@ -22,12 +22,21 @@ Design rationale:
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional
 
 import yaml
 
 logger = logging.getLogger(__name__)
+
+# Newer MLflow versions refuse a plain filesystem tracking URI (paths.mlruns_dir,
+# a bare directory) by default, raising unless this is set - see
+# https://mlflow.org/docs/latest/self-hosting/migrate-from-file-store. This
+# pipeline only needs basic params/metrics/artifact logging, so the file
+# store (not a SQLite/DB backend) is fine; set once here since every stage
+# imports settings before touching mlflow.
+os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
 
 # settings.py lives in step03_bertopic/src/ - step03_bertopic/ itself is
 # where every relative path in the config YAML is resolved from.
@@ -94,7 +103,7 @@ class Settings:
         o = cfg["optuna"]
         self.optuna_n_trials: int         = int(o["n_trials"])
         self.optuna_n_jobs: int           = int(o["n_jobs"])
-        self.optuna_sample_size: int      = int(o["optuna_sample_size"])
+        self.optuna_sample_fraction: float = float(o["optuna_sample_fraction"])
         self.coherence_metric: str        = o["coherence_metric"]
         self.coherence_top_n: int         = int(o["top_n_words"])
         self.coherence_weight: float      = float(o["coherence_weight"])
@@ -104,7 +113,7 @@ class Settings:
 
         # ── Stability ──────────────────────────────────────────────────────────
         s = cfg["stability"]
-        self.sample_sizes: List[int]         = [int(x) for x in s["sample_sizes"]]
+        self.sample_fractions: List[float]   = [float(x) for x in s["sample_fractions"]]
         self.stability_threshold: float      = float(s["stability_threshold"])
         self.top_n_topics_comparison: int    = int(s["top_n_topics_for_comparison"])
 

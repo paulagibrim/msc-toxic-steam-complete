@@ -183,8 +183,8 @@ def run_stability_analysis(settings: Settings) -> dict:
     best_params = settings.load_best_params()
 
     logger.info(
-        "Stage 4 — Stability Analysis | sample sizes: %s | best_params: %s",
-        settings.sample_sizes,
+        "Stage 4 — Stability Analysis | sample fractions: %s | best_params: %s",
+        settings.sample_fractions,
         best_params,
     )
 
@@ -202,13 +202,17 @@ def run_stability_analysis(settings: Settings) -> dict:
     with mlflow.start_run(run_name="stability_analysis") as parent_run:
         mlflow.log_params({
             **{f"best_{k}": v for k, v in best_params.items()},
-            "sample_sizes": str(settings.sample_sizes),
+            "sample_fractions": str(settings.sample_fractions),
             "total_toxic":  total_available,
         })
 
-        for size in settings.sample_sizes:
+        for fraction in settings.sample_fractions:
+            # Same rationale as Stage 3: a fraction of the corpus, not a
+            # fixed count, keeps the ladder proportionally identical across
+            # languages regardless of each corpus's absolute size.
+            size = max(1, round(total_available * fraction))
             actual_size = min(size, total_available)
-            logger.info("--- Running sample_size=%d ---", actual_size)
+            logger.info("--- Running sample_fraction=%.0f%% (%d docs) ---", 100 * fraction, actual_size)
 
             with mlflow.start_run(run_name=f"size_{actual_size}", nested=True):
                 model, metrics = _run_one_size(
@@ -218,6 +222,7 @@ def run_stability_analysis(settings: Settings) -> dict:
                     best_params=best_params,
                     settings=settings,
                 )
+                metrics["sample_fraction"] = fraction
                 models_by_size[actual_size] = model
 
                 # Compute stability score relative to the previous size.

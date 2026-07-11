@@ -89,7 +89,7 @@ def run_one(lang: str, resume: bool, n_trials: int | None) -> None:
     print(f"\n=== [{lang}] Stage 3 — Hyperparameter Search ===")
     print(f"Optuna study     : {settings.optuna_study_name}")
     print(f"Trials           : {settings.optuna_n_trials}")
-    print(f"Sample size      : {settings.optuna_sample_size:,}")
+    print(f"Sample fraction  : {settings.optuna_sample_fraction:.0%}")
     print(f"Coherence metric : {settings.coherence_metric}")
     print(f"DB               : {settings.optuna_db}")
     print()

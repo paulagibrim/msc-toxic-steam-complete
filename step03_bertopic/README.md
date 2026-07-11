@@ -89,10 +89,13 @@ downstream.
 python run/03_search.py
 ```
 
-Searches UMAP/HDBSCAN hyperparameters over a 100K-document sample, minimizing
-`outlier_rate - coherence_weight * coherence`. Persisted to a SQLite study
-(`--resume` continues an interrupted search instead of losing completed
-trials). Writes `best_params.json`, consumed by every stage after this one.
+Searches UMAP/HDBSCAN hyperparameters over a sample of the toxic corpus
+(`optuna.optuna_sample_fraction`, default 10% - a *fraction*, not a fixed
+count, so search coverage is proportionally identical between pt and en
+regardless of each corpus's absolute size), minimizing `outlier_rate -
+coherence_weight * coherence`. Persisted to a SQLite study (`--resume`
+continues an interrupted search instead of losing completed trials). Writes
+`best_params.json`, consumed by every stage after this one.
 
 ## 4. Stability Analysis — HEAVY
 
@@ -100,8 +103,10 @@ trials). Writes `best_params.json`, consumed by every stage after this one.
 python run/04_stability.py
 ```
 
-Trains BERTopic (with Stage 3's best params) at increasing sample sizes
-(100K → 400K) and checks whether the topic structure converges early via
+Trains BERTopic (with Stage 3's best params) at increasing fractions of the
+corpus (`stability.sample_fractions`, default 10% → 20% → 30% → 40% - same
+1:2:3:4 ladder as the original absolute-count design, just proportional
+instead of fixed) and checks whether the topic structure converges early via
 c-TF-IDF cosine similarity between consecutive sizes. Writes
 `stability_report.json` with a recommended training size for Stage 5 - if
 nothing stabilizes, recommends the full toxic dataset.

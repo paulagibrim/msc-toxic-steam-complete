@@ -270,9 +270,9 @@ def run_search(settings: Settings, resume: bool = True) -> dict:
     mlflow.set_experiment("bertopic_hyperparameter_search")
 
     logger.info(
-        "Stage 3 — Hyperparameter Search | %d trials | sample size: %d",
+        "Stage 3 — Hyperparameter Search | %d trials | sample fraction: %.0f%%",
         settings.optuna_n_trials,
-        settings.optuna_sample_size,
+        100 * settings.optuna_sample_fraction,
     )
 
     # ── Load pre-computed PCA embeddings ───────────────────────────────────────
@@ -280,9 +280,14 @@ def run_search(settings: Settings, resume: bool = True) -> dict:
     df_index           = load_toxic_index(settings)
 
     total_available = len(all_pca_embeddings)
-    n_sample = min(settings.optuna_sample_size, total_available)
+    # A fraction of the corpus, not a fixed count: keeps search coverage
+    # proportionally identical across languages/corpus sizes (a fixed N
+    # represents a different share of each language's total), and avoids
+    # an arbitrary absolute cutoff - see config_<lang>.yaml's optuna section.
+    n_sample = max(1, min(total_available, round(total_available * settings.optuna_sample_fraction)))
     logger.info(
-        "Sampling %d / %d toxic documents for Optuna trials.", n_sample, total_available
+        "Sampling %d / %d (%.0f%%) toxic documents for Optuna trials.",
+        n_sample, total_available, 100 * settings.optuna_sample_fraction,
     )
 
     # Fixed-seed sample for reproducibility across trials and reruns.
@@ -315,8 +320,9 @@ def run_search(settings: Settings, resume: bool = True) -> dict:
     else:
         with mlflow.start_run(run_name="optuna_search") as parent_run:
             mlflow.log_params({
-                "n_trials":          settings.optuna_n_trials,
-                "optuna_sample_size": n_sample,
+                "n_trials":              settings.optuna_n_trials,
+                "optuna_sample_fraction": settings.optuna_sample_fraction,
+                "optuna_sample_n":       n_sample,
                 "coherence_metric":  settings.coherence_metric,
                 "coherence_weight":  settings.coherence_weight,
                 "embedding_model":   settings.embedding_model_name,

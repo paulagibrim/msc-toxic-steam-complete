@@ -56,7 +56,7 @@ def run_one(lang: str) -> None:
     setup_logging(log_file)
 
     print(f"\n=== [{lang}] Stage 4 — Stability Analysis ===")
-    print(f"Sample sizes to test : {settings.sample_sizes}")
+    print(f"Sample fractions to test : {[f'{f:.0%}' for f in settings.sample_fractions]}")
     print(f"Stability threshold  : {settings.stability_threshold}")
     print(f"Best params          : {settings.best_params_path}")
     print()
