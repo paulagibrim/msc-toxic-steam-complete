@@ -76,15 +76,35 @@ RAW_URL_COLUMN = "linkComentario"
 RAW_TEXT_COLUMN = "texto"
 RAW_LANGUAGE_COLUMN = "language"
 
+# Steam early-access/refund boilerplate notices, injected in Portuguese
+# regardless of the review's actual language - same patterns stripped in
+# step02's detoxify_scoring.py and step03's text_cleaning.py.
+BOILERPLATE_PATTERNS = [
+    r"AN[AÁ]LISE DE ACESSO ANTECIPADO",
+    r"produto recebido de gra[cç]a",
+]
+
 
 def clean_for_detection(text) -> str:
-    """Strips URLs, digits, punctuation, and symbol/emoji/ASCII-art
-    characters (Unicode Braille/box-drawing blocks are common in Steam
-    review "art" and have no linguistic content), keeping actual letters
-    (any script) and spaces."""
+    """Strips URLs, known Steam boilerplate phrases, digits, punctuation,
+    and symbol/emoji/ASCII-art characters (Unicode Braille/box-drawing
+    blocks are common in Steam review "art" and have no linguistic
+    content), keeping actual letters (any script) and spaces.
+
+    The boilerplate patterns (Steam's own early-access/refund notices,
+    injected in Portuguese regardless of the review's actual language -
+    see step02's detoxify_scoring.py and step03's text_cleaning.py, which
+    already stripped these before scoring/cleaning) were missing here
+    until now - a short, otherwise-English review carrying this Portuguese
+    banner text could get miscategorized by langdetect, and review_lang is
+    the partition key for the entire rest of the pipeline, so this bug sat
+    upstream of everything.
+    """
     if not isinstance(text, str):
         return ""
     text = re.sub(r"http\S+|www\.\S+", " ", text)
+    for pattern in BOILERPLATE_PATTERNS:
+        text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
     text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
     text = re.sub(r"[0-9_]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
