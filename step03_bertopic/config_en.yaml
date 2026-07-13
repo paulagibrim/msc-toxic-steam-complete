@@ -116,6 +116,12 @@ optuna:
   coherence_metric: "c_npmi"
   top_n_words: 10
   coherence_weight: 1.0
+  # Trials producing fewer topics than this are penalised (see
+  # hyperparameter_search.py's module docstring) - added after the pt run
+  # converged on just 3 topics for hundreds of thousands of toxic reviews,
+  # since minimising outlier_rate alone rewards collapsing everything into
+  # a few huge topics if nothing counters that incentive.
+  min_topics: 10
   study_name: "bertopic_steam_en"
   search_space:
     umap:

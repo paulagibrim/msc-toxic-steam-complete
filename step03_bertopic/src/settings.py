@@ -107,6 +107,13 @@ class Settings:
         self.coherence_metric: str        = o["coherence_metric"]
         self.coherence_top_n: int         = int(o["top_n_words"])
         self.coherence_weight: float      = float(o["coherence_weight"])
+        # Trials producing fewer topics than this are penalised in the
+        # objective (see hyperparameter_search.py's _Objective) - without
+        # this, minimising outlier_rate alone rewards collapsing everything
+        # into a handful of huge topics (observed: a pt run converged on
+        # just 3 topics for a corpus of hundreds of thousands of toxic
+        # reviews). Defaults to 10 if omitted, for configs predating this.
+        self.min_topics: int              = int(o.get("min_topics", 10))
         self.optuna_study_name: str       = o["study_name"]
         self.umap_search_space: dict      = o["search_space"]["umap"]
         self.hdbscan_search_space: dict   = o["search_space"]["hdbscan"]

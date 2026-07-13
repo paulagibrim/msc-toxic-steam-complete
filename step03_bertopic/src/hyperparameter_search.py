@@ -14,15 +14,26 @@ What is being optimised?
       density sensitivity of the topic clustering.
 
   The objective function minimises:
-      outlier_rate - coherence_weight * coherence_score
+      outlier_rate - coherence_weight * coherence_score + min_topics_penalty
 
   Where:
     - outlier_rate    : fraction of documents assigned to topic -1 (no cluster).
                         Lower is better.
     - coherence_score : c_npmi (or c_v) coherence over the top-N words per
                         topic, computed with gensim.  Higher is better.
+    - min_topics_penalty : 0 if n_topics >= settings.min_topics, otherwise
+                        1.0 + (min_topics - n_topics) - large enough to always
+                        outweigh a normal trial's outlier_rate/coherence terms,
+                        growing with how far short the trial falls.
 
-  The number of topics is NOT penalised; it emerges from the data.
+  Below settings.min_topics, the number of topics IS penalised - added after
+  an observed failure mode where minimising outlier_rate alone rewards
+  collapsing the whole corpus into a handful of huge topics (a pt run
+  converged on n_neighbors=45, n_components=5, min_samples=12 and produced
+  just 3 topics for hundreds of thousands of toxic reviews: absorbing nearly
+  everything into a few dense blobs minimises outlier_rate, and nothing
+  countered that incentive). Above the floor, topic count is still not
+  otherwise rewarded or penalised - it emerges from the data as before.
 
 Key design decisions:
   - Uses PCA-reduced embeddings (from Stage 2) as UMAP input.  This is
@@ -213,13 +224,25 @@ class _Objective:
 
             objective_value = outlier_rate - sp.coherence_weight * coherence
 
+            # Penalise trials below the minimum topic count - see module
+            # docstring. The penalty (>= 1.0) always outweighs a normal
+            # trial's outlier_rate/coherence terms, so any trial meeting
+            # min_topics ranks strictly better than any trial that doesn't,
+            # while still growing with the shortfall so Optuna has a
+            # gradient to climb back toward min_topics from below.
+            min_topics_penalty = 0.0
+            if n_topics < sp.min_topics:
+                min_topics_penalty = 1.0 + (sp.min_topics - n_topics)
+                objective_value += min_topics_penalty
+
             logger.info(
                 "Trial %d — n_topics=%d | outliers=%.1f%% | "
-                "coherence=%.4f | objective=%.4f",
+                "coherence=%.4f | min_topics_penalty=%.4f | objective=%.4f",
                 trial.number,
                 n_topics,
                 outlier_rate * 100,
                 coherence,
+                min_topics_penalty,
                 objective_value,
             )
 
@@ -237,10 +260,11 @@ class _Objective:
                     "min_samples":      min_samples,
                 })
                 mlflow.log_metrics({
-                    "n_topics":      n_topics,
-                    "outlier_rate":  round(outlier_rate, 4),
-                    "coherence":     round(coherence, 4),
-                    "objective":     round(objective_value, 4),
+                    "n_topics":            n_topics,
+                    "outlier_rate":        round(outlier_rate, 4),
+                    "coherence":           round(coherence, 4),
+                    "min_topics_penalty":  round(min_topics_penalty, 4),
+                    "objective":           round(objective_value, 4),
                 })
 
             return objective_value
