@@ -31,6 +31,17 @@ from pipeline_utils import info, list_parquet_files
 PERSPECTIVE_THRESHOLD = 0.7
 DETOXIFY_THRESHOLD = 0.9
 
+# Steam early-access/refund boilerplate notices, stripped before TF-IDF
+# term extraction - same patterns stripped before Detoxify/sentiment
+# scoring and BERTopic's cleaning (see step02's detoxify_scoring.py) - so
+# these phrases don't show up as literal vocabulary terms and skew the
+# toxic-vs-non-toxic comparison.
+BOILERPLATE_PATTERNS = [
+    r"an[aá]lise de acesso antecipado",
+    r"produto recebido de gra[cç]a",
+    r"produto reembolsado",
+]
+
 # Extra stopwords beyond nltk's per-language list, matching the original
 # notebook's picks (generic words like "game"/"jogo" dominate every review
 # regardless of toxicity, so they add noise rather than signal here).
@@ -76,6 +87,8 @@ def _clean_one(text: str) -> str:
         return ""
     text = text.lower()
     text = re.sub(r"http\S+|www\.\S+", " ", text)
+    for pattern in BOILERPLATE_PATTERNS:
+        text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("utf-8")
     text = re.sub(r"[^a-z\s]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -83,10 +96,10 @@ def _clean_one(text: str) -> str:
 
 
 def clean_text_for_tfidf(series: pd.Series) -> pd.Series:
-    """Lowercases, strips URLs, strips accents, keeps only letters and
-    spaces, collapses whitespace - a heavier normalization meant only for
-    TF-IDF term extraction, separate from the boilerplate-only stripping
-    used before Detoxify/sentiment scoring."""
+    """Strips known boilerplate phrases, lowercases, strips URLs, strips
+    accents, keeps only letters and spaces, collapses whitespace - heavier
+    normalization than the boilerplate-only stripping used before Detoxify/
+    sentiment scoring, but the same boilerplate patterns either way."""
     return series.apply(_clean_one)
 
 

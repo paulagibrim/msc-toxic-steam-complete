@@ -23,6 +23,20 @@ it - Detoxify scores a review's text, not its file/partition location, so
 a review that only moved between language folders doesn't need rescoring.
 Only reviews with no cached score (genuinely new to this output) go
 through the model.
+
+--cache-exclude-pattern: optional regex - cached rows whose review_text
+matches it are excluded from the cache (forced to re-score) instead of
+reusing a stale value. Use after adding a new boilerplate pattern to
+BOILERPLATE_PATTERNS, so only the rows that pattern actually affects get
+re-scored, not the whole cache.
+
+--fix-pattern: optional regex - patches already-scored files IN PLACE,
+directly against the SAME --output-dir (no --cache-from, no moving
+anything aside first). Checks each existing output file for rows whose
+review_text matches the pattern; if none match, the file is skipped as
+usual; if some do, only those rows are re-scored and the file is
+overwritten - everything else in it stays untouched. Simplest way to apply
+a newly-added BOILERPLATE_PATTERNS entry to already-scored data.
 """
 import argparse
 from pathlib import Path
@@ -54,6 +68,17 @@ def parse_args():
         "detoxify_score by review_url instead of re-running the model on reviews "
         "already scored there. Optional.",
     )
+    parser.add_argument(
+        "--cache-exclude-pattern", default=None,
+        help="Regex - cached rows whose review_text matches this are excluded from "
+        "the cache and re-scored, instead of reusing a stale value. Optional.",
+    )
+    parser.add_argument(
+        "--fix-pattern", default=None,
+        help="Regex - patches already-scored files in place (same --output-dir): "
+        "rows whose review_text matches this are re-scored, everything else in the "
+        "file is left untouched. Optional.",
+    )
     return parser.parse_args()
 
 
@@ -68,7 +93,11 @@ def main():
 
     for lang in languages:
         output_dir = args.output_dir / f"review_lang={lang}"
-        ds.run_detoxify_for_language(args.input, output_dir, lang, device=device, cache_from=args.cache_from)
+        ds.run_detoxify_for_language(
+            args.input, output_dir, lang, device=device,
+            cache_from=args.cache_from, cache_exclude_pattern=args.cache_exclude_pattern,
+            fix_pattern=args.fix_pattern,
+        )
         info(f"[{lang}] done -> {output_dir}")
 
 
