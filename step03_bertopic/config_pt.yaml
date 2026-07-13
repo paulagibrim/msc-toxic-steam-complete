@@ -23,7 +23,7 @@ seed: 42
 # ------------------------------------------------------------------------------
 paths:
   # Input: step02_run_detoxify's output for this language
-  detoxify_data_dir: "../../steam-data/step02-output-fixed/review_lang=pt"
+  detoxify_data_dir: "../../steam-data/step02-output/review_lang=pt"
 
   # Stage 1 output: cleaned parquet files
   cleaned_data_dir: "../../steam-data/step03-output/pt/cleaned"

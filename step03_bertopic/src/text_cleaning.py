@@ -60,6 +60,7 @@ _OUTPUT_COLUMNS = ["review_text_clean", "is_toxic", "review_url", "game_id"]
 _BOILERPLATE_PATTERNS = [
     r"an[aá]lise de acesso antecipado",
     r"produto recebido de gra[cç]a",
+    r"produto reembolsado",
 ]
 
 

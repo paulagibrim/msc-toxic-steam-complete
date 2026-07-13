@@ -36,6 +36,7 @@ MAX_CHARS = 1200
 BOILERPLATE_PATTERNS = [
     r"AN[AÁ]LISE DE ACESSO ANTECIPADO",
     r"produto recebido de gra[cç]a",
+    r"produto reembolsado",
 ]
 
 
