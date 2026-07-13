@@ -37,6 +37,7 @@ MAX_CHARS = 1200
 BOILERPLATE_PATTERNS = [
     r"AN[AÁ]LISE DE ACESSO ANTECIPADO",
     r"produto recebido de gra[cç]a",
+    r"produto reembolsado",
 ]
 
 # Sentinel written when a batch fails to score - outside the valid [1, 5]
@@ -187,16 +188,28 @@ def score_file(
 
 
 def run_sentiment_for_language(
-    reviews_dir: Path, output_dir: Path, lang: str, device=None, cache_from: Path = None
+    reviews_dir: Path, output_dir: Path, lang: str, device=None, cache_from: Path = None, reverse: bool = False
 ) -> list:
     """Scores every file in review_lang=<lang>, resuming per-file. A
     failure on one file is logged and skipped rather than aborting the run.
 
     cache_from: optional path to an already-scored step04 output directory
     (see load_score_cache) - reused so re-scoring after an upstream fix
-    doesn't re-run the model on reviews it already scored."""
+    doesn't re-run the model on reviews it already scored.
+
+    reverse: process files last-to-first instead of first-to-last. Lets a
+    second process (ideally pinned to the other GPU via --device) work
+    through the same file list from the opposite end at the same time -
+    each file is independently skip-if-exists, so the two runs converge in
+    the middle without redoing each other's work. There's a small chance
+    both processes pick the same not-yet-done file at the same moment (a
+    race on that one file, wasting a little duplicate GPU work, not
+    file corruption - both would compute and write the same correct
+    result), but that's harmless and self-resolving."""
     partition_dir = reviews_dir / f"review_lang={lang}"
     files = list_parquet_files(partition_dir)
+    if reverse:
+        files = list(reversed(files))
 
     cache = load_score_cache(cache_from, lang) if cache_from else {}
 

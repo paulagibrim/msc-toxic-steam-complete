@@ -20,6 +20,13 @@ Device auto-detects cuda > mps > cpu; pass --device to force one (e.g.
 language-detection fix). Reuses each review's already-computed
 sentiment_score (matched by review_url) instead of re-running the model on
 it. Only reviews with no cached score go through the model.
+
+--reverse: process files last-to-first. Run a second process with this
+flag (pinned to the other GPU via --device) at the same time as a normal
+forward run, to work through the same file list from both ends at once -
+e.g.:
+    python run_sentiment.py --lang en --device cuda:0 ...            # forward
+    python run_sentiment.py --lang en --device cuda:1 --reverse ...  # backward
 """
 import argparse
 from pathlib import Path
@@ -52,6 +59,11 @@ def parse_args():
         "sentiment_score by review_url instead of re-running the model on reviews "
         "already scored there. Optional.",
     )
+    parser.add_argument(
+        "--reverse", action="store_true",
+        help="Process files last-to-first - run alongside a normal forward run "
+        "(ideally on a different --device) to work through the file list from both ends.",
+    )
     return parser.parse_args()
 
 
@@ -66,7 +78,9 @@ def main():
 
     for lang in languages:
         output_dir = args.output_dir / f"review_lang={lang}"
-        ss.run_sentiment_for_language(args.input, output_dir, lang, device=device, cache_from=args.cache_from)
+        ss.run_sentiment_for_language(
+            args.input, output_dir, lang, device=device, cache_from=args.cache_from, reverse=args.reverse
+        )
         info(f"[{lang}] done -> {output_dir}")
 
 
