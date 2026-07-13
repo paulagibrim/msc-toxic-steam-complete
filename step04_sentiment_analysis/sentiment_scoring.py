@@ -137,6 +137,7 @@ def _score_texts(texts: list, tokenizer, model, device, batch_size: int) -> list
 def score_file(
     file_path: Path,
     output_dir: Path,
+    lang: str,
     tokenizer,
     model,
     device,
@@ -148,6 +149,11 @@ def score_file(
     """Scores one review_lang=<lang> file, writing every column already in
     the file plus the new `sentiment_score` to `output_dir` under the same
     filename. Skips (resumes) if the output file already exists.
+
+    Re-checks perspective_declared_language == lang before scoring, even
+    though step02's own detoxify_scoring.py already applies this exact
+    mask - a cheap, explicit double-check (same defense-in-depth as
+    step03's text_cleaning.py), not a second data-processing pass.
 
     If `cache` (a review_url -> sentiment_score dict, see load_score_cache)
     is given, rows whose review_url is already in it reuse that score
@@ -186,7 +192,17 @@ def score_file(
         return output_path
 
     warn_if_not_materialized(file_path)
-    df = pd.read_parquet(file_path).reset_index(drop=True)
+    df = pd.read_parquet(file_path)
+
+    rows_before_agreement = len(df)
+    df = df[df["perspective_declared_language"] == lang].reset_index(drop=True)
+    n_excluded_disagreement = rows_before_agreement - len(df)
+    if n_excluded_disagreement:
+        info(
+            f"{file_path.name}: excluding {n_excluded_disagreement} row(s) where "
+            f"perspective_declared_language != '{lang}' (unexpected - step02 "
+            f"should have already filtered these)"
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if df.empty:
@@ -261,7 +277,7 @@ def run_sentiment_for_language(
         info(f"[{lang}] [{i}/{len(files)}] {f.name}")
         try:
             output_paths.append(
-                score_file(f, output_dir, tokenizer, model, device, cache=cache, fix_pattern=fix_pattern)
+                score_file(f, output_dir, lang, tokenizer, model, device, cache=cache, fix_pattern=fix_pattern)
             )
         except Exception as e:
             error(f"[{lang}] Fatal error on {f.name}: {e} - skipping to next file")

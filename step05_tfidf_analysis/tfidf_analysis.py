@@ -53,11 +53,27 @@ STOPWORD_EXTRAS = {
 
 def load_reviews_for_language(step02_dir: Path, lang: str) -> pd.DataFrame:
     """Reads and concatenates every review_lang=<lang> file from step02's
-    output - both toxic and non-toxic rows, unlike step03/step04's inputs."""
+    output - both toxic and non-toxic rows, unlike step03/step04's inputs.
+
+    Re-checks perspective_declared_language == lang before returning, even
+    though step02's own detoxify_scoring.py already applies this exact
+    mask - a cheap, explicit double-check (same defense-in-depth as
+    step03/step04), not a second data-processing pass."""
     partition_dir = step02_dir / f"review_lang={lang}"
     files = list_parquet_files(partition_dir)
     frames = [pd.read_parquet(f) for f in files]
-    return pd.concat(frames, ignore_index=True)
+    df = pd.concat(frames, ignore_index=True)
+
+    rows_before_agreement = len(df)
+    df = df[df["perspective_declared_language"] == lang].reset_index(drop=True)
+    n_excluded_disagreement = rows_before_agreement - len(df)
+    if n_excluded_disagreement:
+        info(
+            f"[{lang}] Excluding {n_excluded_disagreement} row(s) where "
+            f"perspective_declared_language != '{lang}' (unexpected - step02 "
+            f"should have already filtered these)"
+        )
+    return df
 
 
 def label_toxicity(df: pd.DataFrame) -> pd.DataFrame:
