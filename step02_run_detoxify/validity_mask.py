@@ -18,12 +18,14 @@ from pipeline_utils import info, list_parquet_files, save_summary
 
 
 def load_scored_language(step02_dir: Path, lang: str) -> pd.DataFrame:
-    """Reads and concatenates the perspective_score/detoxify_score columns
-    from every review_lang=<lang> file in step02's own output."""
-    partition_dir = step02_dir / f"review_lang={lang}"
-    files = list_parquet_files(partition_dir)
-    frames = [pd.read_parquet(f, columns=["perspective_score", "detoxify_score"]) for f in files]
-    return pd.concat(frames, ignore_index=True)
+    """Reads the perspective_score/detoxify_score/review_lang columns from
+    every file in step02's own (flat) output and filters to review_lang ==
+    lang - step02's output holds every scored language together, not one
+    file per language (see detoxify_scoring.py's module docstring)."""
+    files = list_parquet_files(step02_dir)
+    frames = [pd.read_parquet(f, columns=["perspective_score", "detoxify_score", "review_lang"]) for f in files]
+    df = pd.concat(frames, ignore_index=True)
+    return df[df["review_lang"] == lang]
 
 
 def apply_validity_mask(df: pd.DataFrame) -> pd.Series:

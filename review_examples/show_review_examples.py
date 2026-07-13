@@ -8,26 +8,23 @@ Pulls from up to four sources, cross-referenced by review_url/game_id:
     this filters and samples from.
   - step01's games.parquet (game title, popular_tags) - joined by game_id,
     for the game_name column and the optional game_tag filter.
-  - step04's output (sentiment_score), if that language's folder is
-    provided/exists - joined by review_url, only for the sampled rows (not
-    the whole corpus, to avoid loading a second multi-million-row dataset
-    just to label a handful of examples).
+  - step04's output (sentiment_score), if it's provided/exists - joined by
+    review_url, only for the sampled rows (not the whole corpus, to avoid
+    loading a second multi-million-row dataset just to label a handful of
+    examples).
   - step03's classified_toxic.parquet (topic), if that language's Stage 7
     export is provided/exists - joined by review_url, only for the sampled
     rows. Only toxic reviews ever have a topic (BERTopic trains on the
     toxic subset only - see step03's README), so this is always empty for
     non-toxic examples.
 
-`review_lang` (langdetect's own guess) is never a real column in any of
-these files - step01 wrote it as Hive-style partitioning
-(partition_on=["review_lang"]), so it only exists as the `review_lang=<lang>`
-folder name, never as leaf-file data. Reading from that folder guarantees
-review_lang == lang by construction (there's no data value left to check).
-`perspective_declared_language` IS a real column, though - step02's own
-detoxify_scoring.py already filters to perspective_declared_language ==
-lang before scoring, so every row here should already agree, but that's
-re-verified explicitly in load_scored_reviews below (not just trusted)
-before anything else runs, same as step03's text_cleaning.py does.
+step01/step02/step04's output is flat (review_lang is a plain column, not
+a directory partition - see step02_run_detoxify/detoxify_scoring.py's
+module docstring): every language is scored together in the same file, so
+`review_lang == lang AND perspective_declared_language == lang` is what
+actually selects this language's rows, not just a defensive double-check -
+applied explicitly in load_scored_reviews below, same as step03's
+text_cleaning.py and step05's tfidf_analysis.py.
 
 Toxicity uses the same union rule and thresholds as everywhere else in
 this project (perspective_score >= 0.7 OR detoxify_score >= 0.9, rows with
@@ -75,35 +72,29 @@ def load_games(games_path: Path) -> pd.DataFrame:
 
 
 def load_scored_reviews(step02_dir: Path, lang: str) -> pd.DataFrame:
-    """Base table: every step02-scored review for one language.
-
-    review_lang == lang is guaranteed by construction (see module
-    docstring - it's the folder we're reading from, not a real column).
-    perspective_declared_language IS a real column, so it's explicitly
-    re-checked here (== lang) rather than trusted from step02 alone -
-    same double-check step03's text_cleaning.py does. Any row that
-    disagrees is dropped and logged (unexpected in the normal flow, since
-    step02 should have already filtered these)."""
-    partition_dir = step02_dir / f"review_lang={lang}"
-    files = list_parquet_files(partition_dir)
+    """Base table: every step02-scored review for one language, read from
+    step02's flat output (every language scored together in the same
+    files - see module docstring) and filtered to
+    review_lang == perspective_declared_language == lang."""
+    files = list_parquet_files(step02_dir)
     columns = [
         "review_url", "review_text", "game_id",
-        "perspective_score", "detoxify_score", "perspective_declared_language",
+        "perspective_score", "detoxify_score", "review_lang", "perspective_declared_language",
     ]
     frames = [pd.read_parquet(f, columns=columns) for f in files]
     df = pd.concat(frames, ignore_index=True)
 
-    rows_before_agreement = len(df)
-    df = df[df["perspective_declared_language"] == lang].copy()
-    n_excluded_disagreement = rows_before_agreement - len(df)
-    if n_excluded_disagreement:
+    rows_before_mask = len(df)
+    df = df[
+        (df["review_lang"] == lang) & (df["perspective_declared_language"] == lang)
+    ].copy()
+    n_excluded = rows_before_mask - len(df)
+    if n_excluded:
         info(
-            f"[{lang}] Excluded {n_excluded_disagreement} row(s) where "
-            f"perspective_declared_language != '{lang}' (unexpected - step02 "
-            f"should have already filtered these)"
+            f"[{lang}] Excluded {n_excluded} row(s) not matching "
+            f"review_lang == perspective_declared_language == '{lang}'"
         )
 
-    df["review_lang"] = lang
     return df.drop(columns=["perspective_declared_language"])
 
 
@@ -163,17 +154,24 @@ def attach_game_names(df: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
 
 def attach_sentiment(df: pd.DataFrame, step04_dir: Path, lang: str) -> pd.DataFrame:
     """Left-joins sentiment_score for the sampled rows only, if step04's
-    output exists for this language. No-op (adds an empty column) if not -
-    per this function's contract, this data may not be available yet."""
-    partition_dir = (step04_dir / f"review_lang={lang}") if step04_dir else None
-    if not partition_dir or not partition_dir.exists():
+    output exists. No-op (adds an empty column) if not - per this
+    function's contract, this data may not be available yet.
+
+    step04's output is flat (every language scored together, same as
+    step02 - see sentiment_scoring.py's module docstring), so review_url
+    alone is enough to join correctly without needing a language filter -
+    it's still applied here for consistency with load_scored_reviews and
+    as a defensive check against any stray cross-language review_url
+    collision."""
+    if not step04_dir or not step04_dir.exists():
         info(f"No step04 output found for [{lang}] - sentiment_score will be empty")
         df["sentiment_score"] = pd.NA
         return df
 
-    files = list_parquet_files(partition_dir)
-    frames = [pd.read_parquet(f, columns=["review_url", "sentiment_score"]) for f in files]
+    files = list_parquet_files(step04_dir)
+    frames = [pd.read_parquet(f, columns=["review_url", "review_lang", "sentiment_score"]) for f in files]
     sentiment = pd.concat(frames, ignore_index=True)
+    sentiment = sentiment[sentiment["review_lang"] == lang].drop(columns=["review_lang"])
     return df.merge(sentiment, on="review_url", how="left")
 
 

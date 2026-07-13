@@ -1,28 +1,31 @@
-"""CLI for detoxify_scoring.py - scores step01's cleaned reviews (pt and en)
-with Detoxify, keeping only `toxicity` (renamed `detoxify_score`).
+"""CLI for detoxify_scoring.py - scores step01's cleaned reviews (pt and en
+by default) with Detoxify, keeping only `toxicity` (renamed
+`detoxify_score`).
 
 Usage:
     python run_detoxify.py \\
         --input ../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \\
         --output-dir ../../steam-data/step02-output
 
-Defaults to scoring both pt and en (pass --lang to override, repeatable).
 `--input` is step01's reviews_cleaned.parquet directory - review_lang is a
 plain column there, not a subfolder (see clean_reviews.py's module
-docstring), so every file holds a mix of languages and gets read once per
---lang value processed. Output still goes to --output-dir/review_lang=<lang>/
-(same filenames as the input files, so each is independently resumable) -
-only step01's structure changed, step02's own output layout hasn't.
+docstring). Every target language (pt+en by default; pass --lang to
+override, repeatable) is scored together in ONE pass over each file - this
+step's own output is flat too (review_lang stays a column, no
+`review_lang=<lang>/` subfolders), for consistency with step01 and every
+other step in this project. Downstream steps filter `review_lang == lang`
+themselves after reading. Output goes to --output-dir/ directly (same
+filenames as the input files, so each is independently resumable).
 
 Device auto-detects cuda > mps > cpu; pass --device to force one (e.g.
 --device cuda:0 to pin a specific GPU on a multi-GPU machine).
 
 --cache-from: optional path to an already-scored step02 output directory
-(e.g. the old ../../steam-data/step02-output, before a step01
-language-detection fix). Reuses each review's already-computed
+(flat or the older per-language-folder layout - see
+detoxify_scoring.load_score_cache). Reuses each review's already-computed
 detoxify_score (matched by review_url) instead of re-running the model on
 it - Detoxify scores a review's text, not its file/partition location, so
-a review that only moved between language folders doesn't need rescoring.
+a review that only moved between files/languages doesn't need rescoring.
 Only reviews with no cached score (genuinely new to this output) go
 through the model.
 
@@ -49,7 +52,7 @@ from pipeline_utils import info
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Scores step01's cleaned pt/en reviews with Detoxify (toxicity only, as detoxify_score)."
+        description="Scores step01's cleaned reviews with Detoxify (toxicity only, as detoxify_score)."
     )
     parser.add_argument(
         "--input", required=True, type=Path,
@@ -58,7 +61,7 @@ def parse_args():
     parser.add_argument("--output-dir", required=True, type=Path, help="Directory to write scored output to")
     parser.add_argument(
         "--lang", action="append", dest="languages", default=None,
-        help="Language to score (repeat for multiple). Defaults to both pt and en.",
+        help="Language to score (repeat for multiple). Defaults to both pt and en, scored together in one pass.",
     )
     parser.add_argument(
         "--device", default=None,
@@ -93,14 +96,12 @@ def main():
         import torch
         device = torch.device(args.device)
 
-    for lang in languages:
-        output_dir = args.output_dir / f"review_lang={lang}"
-        ds.run_detoxify_for_language(
-            args.input, output_dir, lang, device=device,
-            cache_from=args.cache_from, cache_exclude_pattern=args.cache_exclude_pattern,
-            fix_pattern=args.fix_pattern,
-        )
-        info(f"[{lang}] done -> {output_dir}")
+    ds.run_detoxify(
+        args.input, args.output_dir, languages, device=device,
+        cache_from=args.cache_from, cache_exclude_pattern=args.cache_exclude_pattern,
+        fix_pattern=args.fix_pattern,
+    )
+    info(f"done -> {args.output_dir}")
 
 
 if __name__ == "__main__":

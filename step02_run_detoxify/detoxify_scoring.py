@@ -1,19 +1,21 @@
 """Runs Detoxify on step01's cleaned reviews (reviews_cleaned.parquet/
 *.parquet), one file at a time, keeping only rows that pass BOTH: langdetect
-says `review_lang == lang`, AND Perspective's own declared language also
-agrees (`perspective_declared_language == lang`) - see
+says `review_lang` is one of the target languages, AND Perspective's own
+declared language agrees with that SAME value
+(`perspective_declared_language == review_lang`) - see
 step01_cleaning_and_language_detection/agreement_mask.py.
 
 review_lang is a plain column in step01's output, not a directory
-partition (see clean_reviews.export_reviews's docstring) - so every source
-file can contain a mix of languages, and this filters `review_lang == lang`
-itself on every read, the same way it already filtered
-`perspective_declared_language == lang`. This means each source file gets
-read once per language processed (e.g. twice total for pt + en) - a real
-but deliberate I/O cost, in exchange for language reclassification (e.g. a
-new boilerplate pattern added to langdetect_revalidation.py) never again
-requiring reviews to physically move between files/folders - see this
-project's actual "produto reembolsado" incident, where Hive-style
+partition (see clean_reviews.export_reviews's docstring) - and, per
+explicit user decision, this step's OWN output is flat too, for the same
+reason and for consistency across the whole pipeline: every file is read
+ONCE (not once per language - a straight efficiency win over an earlier
+per-language-loop version of this module) and scores every target
+language's matching rows together in the same pass, writing one flat
+output file per source file. Downstream steps (step03/04/05,
+review_examples) filter `review_lang == lang` themselves after reading,
+the same way they already filter `perspective_declared_language == lang` -
+see this project's actual "produto reembolsado" incident, where Hive-style
 partitioning by review_lang caused reprocessed reviews to silently keep
 stale results under file-based resumability.
 
@@ -43,7 +45,7 @@ BATCH_SIZE = 32
 MAX_CHARS = 1200
 
 # Steam early-access/refund boilerplate notices, stripped from review text
-# before scoring - applied to both languages (this boilerplate is inserted
+# before scoring - applied to every language (this boilerplate is inserted
 # in Portuguese by Steam's own interface regardless of the review's actual
 # language, per prior observation in this project's earlier iteration).
 BOILERPLATE_PATTERNS = [
@@ -63,25 +65,29 @@ def clean_review_text(text):
     return text.strip()
 
 
-def apply_agreement_mask(df: pd.DataFrame, lang: str) -> pd.DataFrame:
-    """Keeps only rows where BOTH langdetect's own `review_lang` AND
-    Perspective's declared language equal `lang`. Since review_lang is a
-    plain column (not a directory partition - see clean_reviews.py's
-    module docstring), a source file can hold any mix of languages, so the
-    review_lang check is just as necessary here as the
-    perspective_declared_language one - neither is guaranteed by which
-    file `df` came from."""
-    return df[(df["review_lang"] == lang) & (df["perspective_declared_language"] == lang)]
+def apply_language_mask(df: pd.DataFrame, langs: list) -> pd.DataFrame:
+    """Keeps rows where review_lang is one of `langs` AND
+    perspective_declared_language agrees with that SAME value (not just
+    membership in `langs` - both signals must point to the identical
+    language). Since review_lang is a plain column (not a directory
+    partition - see clean_reviews.py's module docstring), a source file
+    can hold any mix of languages, so this check is necessary regardless
+    of which file `df` came from."""
+    return df[df["review_lang"].isin(langs) & (df["review_lang"] == df["perspective_declared_language"])]
 
 
-def load_score_cache(old_output_dir: Path, lang: str, exclude_pattern: str = None) -> dict:
+def load_score_cache(old_output_dir: Path, langs: list, exclude_pattern: str = None) -> dict:
     """Builds a review_url -> detoxify_score lookup from an already-scored
-    step02 output directory (e.g. before an upstream language-detection fix
-    that changes which file/partition a review lands in, but not its
-    score - Detoxify scores a review's text, not its file location).
-    Passed into score_file/run_detoxify_for_language to skip re-running the
-    model on reviews already scored, however this re-run's file layout
-    happens to be split up. Returns {} if the directory doesn't exist.
+    step02 output directory. Passed into score_file/run_detoxify to skip
+    re-running the model on reviews already scored, however this re-run's
+    file layout happens to be split up. Returns {} if the directory
+    doesn't exist.
+
+    Supports both this module's current flat output layout (read directly)
+    and the older per-language `review_lang=<lang>/` folder layout still
+    sitting around from before this project standardized on flat+mask
+    everywhere - tries flat first, falls back to per-language folders per
+    language in `langs` if no flat files are found.
 
     exclude_pattern: optional regex (case-insensitive) - review_urls whose
     review_text matches this are EXCLUDED from the cache, forcing them to
@@ -89,14 +95,23 @@ def load_score_cache(old_output_dir: Path, lang: str, exclude_pattern: str = Non
     output was scored before a BOILERPLATE_PATTERNS fix (e.g. a newly
     added pattern), so only the actually-affected rows get re-scored and
     everything else still reuses the cache."""
-    partition_dir = old_output_dir / f"review_lang={lang}"
-    if not partition_dir.exists():
-        info(f"No cache directory found at {partition_dir} - starting with an empty cache")
+    if not old_output_dir.exists():
+        info(f"No cache directory found at {old_output_dir} - starting with an empty cache")
         return {}
-    files = list_parquet_files(partition_dir)
+
+    columns = ["review_url", "detoxify_score", "review_text"] if exclude_pattern else ["review_url", "detoxify_score"]
+
+    files = list_parquet_files(old_output_dir)
+    if not files:
+        # Fall back to the older review_lang=<lang>/ folder layout.
+        files = []
+        for lang in langs:
+            lang_dir = old_output_dir / f"review_lang={lang}"
+            if lang_dir.is_dir():
+                files.extend(list_parquet_files(lang_dir))
     if not files:
         return {}
-    columns = ["review_url", "detoxify_score", "review_text"] if exclude_pattern else ["review_url", "detoxify_score"]
+
     frames = [pd.read_parquet(f, columns=columns) for f in files]
     combined = pd.concat(frames, ignore_index=True)
 
@@ -104,11 +119,11 @@ def load_score_cache(old_output_dir: Path, lang: str, exclude_pattern: str = Non
         affected = combined["review_text"].str.contains(exclude_pattern, case=False, na=False, regex=True)
         n_affected = int(affected.sum())
         if n_affected:
-            info(f"[{lang}] Excluding {n_affected} cached score(s) matching exclude_pattern (will be re-scored)")
+            info(f"Excluding {n_affected} cached score(s) matching exclude_pattern (will be re-scored)")
         combined = combined[~affected]
 
     cache = dict(zip(combined["review_url"], combined["detoxify_score"]))
-    info(f"[{lang}] Loaded {len(cache)} cached score(s) from {old_output_dir}")
+    info(f"Loaded {len(cache)} cached score(s) from {old_output_dir}")
     return cache
 
 
@@ -150,7 +165,7 @@ def _score_texts(texts: list, model, device, batch_size: int) -> list:
 def score_file(
     file_path: Path,
     output_dir: Path,
-    lang: str,
+    langs: list,
     model,
     device,
     batch_size: int = BATCH_SIZE,
@@ -158,17 +173,18 @@ def score_file(
     cache: dict = None,
     fix_pattern: str = None,
 ) -> Path:
-    """Scores one review_lang=<lang> file with Detoxify, writing every
-    column already in the file (review_text, game_id, perspective_score,
-    etc.) plus the new `detoxify_score` to `output_dir` under the same
-    filename. Skips (resumes) if the output file already exists.
+    """Scores one file with Detoxify - every target language's matching
+    rows in the same pass - writing every column already in the file
+    (review_text, game_id, perspective_score, review_lang, etc.) plus the
+    new `detoxify_score` to `output_dir` under the same filename. Skips
+    (resumes) if the output file already exists.
 
     If `cache` (a review_url -> detoxify_score dict, see load_score_cache)
     is given, rows whose review_url is already in it reuse that score
     instead of running the model again - useful when this file's layout
     came from a re-run of an earlier stage (e.g. a language-detection fix)
-    that doesn't change individual reviews' scores, only which file/
-    partition they land in.
+    that doesn't change individual reviews' scores, only which file they
+    land in.
 
     If `fix_pattern` is given AND the output file already exists, checks
     whether any of ITS rows have review_text matching that pattern
@@ -205,11 +221,11 @@ def score_file(
 
     warn_if_not_materialized(file_path)
     df = pd.read_parquet(file_path)
-    df = apply_agreement_mask(df, lang).copy().reset_index(drop=True)
+    df = apply_language_mask(df, langs).copy().reset_index(drop=True)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if df.empty:
-        info(f"Nothing to score in {file_path.name} after the agreement mask - writing an empty result.")
+        info(f"Nothing to score in {file_path.name} after the language mask - writing an empty result.")
         df["detoxify_score"] = pd.Series(dtype="float64")
         df.to_parquet(output_path, engine="pyarrow", index=False)
         return output_path
@@ -236,7 +252,11 @@ def score_file(
 
     df["detoxify_score"] = final_scores
     df.to_parquet(output_path, engine="pyarrow", index=False)
-    info(f"Scored {file_path.name} ({len(to_score_idx)} new, {len(df) - len(to_score_idx)} cached) -> {output_path}")
+    counts_by_lang = df["review_lang"].value_counts().to_dict()
+    info(
+        f"Scored {file_path.name} ({len(to_score_idx)} new, {len(df) - len(to_score_idx)} cached, "
+        f"by language: {counts_by_lang}) -> {output_path}"
+    )
 
     import gc
     del df, final_scores
@@ -244,18 +264,18 @@ def score_file(
     return output_path
 
 
-def run_detoxify_for_language(
-    reviews_cleaned_dir: Path, output_dir: Path, lang: str, device=None, cache_from: Path = None,
+def run_detoxify(
+    reviews_cleaned_dir: Path, output_dir: Path, langs: list, device=None, cache_from: Path = None,
     cache_exclude_pattern: str = None, fix_pattern: str = None,
 ) -> list:
-    """Scores every file under reviews_cleaned_dir, resuming per-file. A
-    failure on one file is logged and skipped rather than aborting the run.
+    """Scores every file under reviews_cleaned_dir ONCE, resuming per-file.
+    A failure on one file is logged and skipped rather than aborting the
+    run.
 
-    reviews_cleaned_dir holds every language's reviews together (review_lang
-    is a plain column, not a directory partition - see clean_reviews.py's
-    module docstring), so every file is read once per language processed
-    (apply_agreement_mask filters review_lang == lang inside score_file) -
-    this function itself doesn't pre-filter which files to look at.
+    langs: every target language is scored together in the same pass over
+    each file (apply_language_mask filters review_lang.isin(langs) inside
+    score_file) - unlike an earlier per-language-loop version of this
+    module, a file is never read twice for two different languages.
 
     cache_from: optional path to an already-scored step02 output directory
     (see load_score_cache) - reused so re-scoring after an upstream fix
@@ -271,17 +291,17 @@ def run_detoxify_for_language(
     See score_file's docstring."""
     files = list_parquet_files(reviews_cleaned_dir)
 
-    cache = load_score_cache(cache_from, lang, exclude_pattern=cache_exclude_pattern) if cache_from else {}
+    cache = load_score_cache(cache_from, langs, exclude_pattern=cache_exclude_pattern) if cache_from else {}
 
     model, device = load_detoxify_model(device)
-    info(f"[{lang}] Detoxify model loaded on device: {device}")
+    info(f"Detoxify model loaded on device: {device} (languages: {langs})")
 
     output_paths = []
     for i, f in enumerate(files, start=1):
-        info(f"[{lang}] [{i}/{len(files)}] {f.name}")
+        info(f"[{i}/{len(files)}] {f.name}")
         try:
-            output_paths.append(score_file(f, output_dir, lang, model, device, cache=cache, fix_pattern=fix_pattern))
+            output_paths.append(score_file(f, output_dir, langs, model, device, cache=cache, fix_pattern=fix_pattern))
         except Exception as e:
-            error(f"[{lang}] Fatal error on {f.name}: {e} - skipping to next file")
+            error(f"Fatal error on {f.name}: {e} - skipping to next file")
             continue
     return output_paths

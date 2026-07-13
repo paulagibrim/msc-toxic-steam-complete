@@ -7,17 +7,22 @@ Usage:
         --input ../../steam-data/step02-output \\
         --output-dir ../../steam-data/step04-output
 
-Defaults to scoring both pt and en (pass --lang to override, repeatable).
-`--input` is step02's output directory (contains the review_lang=<lang>
-subfolders). Output goes to --output-dir/review_lang=<lang>/ (same
-filenames as the input files, so each is independently resumable).
+`--input` is step02's output directory - review_lang is a plain column
+there, not a subfolder (see detoxify_scoring.py's module docstring). Every
+target language (pt+en by default; pass --lang to override, repeatable) is
+scored together in ONE pass over each file - this step's own output is
+flat too (review_lang stays a column, no `review_lang=<lang>/`
+subfolders), for consistency with step02 and every other step in this
+project. Downstream steps filter `review_lang == lang` themselves after
+reading. Output goes to --output-dir/ directly (same filenames as the
+input files, so each is independently resumable).
 
 Device auto-detects cuda > mps > cpu; pass --device to force one (e.g.
 --device cuda:0 to pin a specific GPU on a multi-GPU machine).
 
 --cache-from: optional path to an already-scored step04 output directory
-(e.g. the old ../../steam-data/step04-output, before a step01
-language-detection fix). Reuses each review's already-computed
+(flat or the older per-language-folder layout - see
+sentiment_scoring.load_score_cache). Reuses each review's already-computed
 sentiment_score (matched by review_url) instead of re-running the model on
 it. Only reviews with no cached score go through the model.
 
@@ -25,8 +30,8 @@ it. Only reviews with no cached score go through the model.
 flag (pinned to the other GPU via --device) at the same time as a normal
 forward run, to work through the same file list from both ends at once -
 e.g.:
-    python run_sentiment.py --lang en --device cuda:0 ...            # forward
-    python run_sentiment.py --lang en --device cuda:1 --reverse ...  # backward
+    python run_sentiment.py --device cuda:0 ...            # forward
+    python run_sentiment.py --device cuda:1 --reverse ...  # backward
 
 --fix-pattern: optional regex - patches already-scored files IN PLACE,
 directly against the SAME --output-dir (no --cache-from, no moving
@@ -48,12 +53,12 @@ def parse_args():
     )
     parser.add_argument(
         "--input", required=True, type=Path,
-        help="Path to step02's output directory (contains review_lang=<lang> subfolders)",
+        help="Path to step02's output directory",
     )
     parser.add_argument("--output-dir", required=True, type=Path, help="Directory to write scored output to")
     parser.add_argument(
         "--lang", action="append", dest="languages", default=None,
-        help="Language to score (repeat for multiple). Defaults to both pt and en.",
+        help="Language to score (repeat for multiple). Defaults to both pt and en, scored together in one pass.",
     )
     parser.add_argument(
         "--device", default=None,
@@ -88,13 +93,11 @@ def main():
         import torch
         device = torch.device(args.device)
 
-    for lang in languages:
-        output_dir = args.output_dir / f"review_lang={lang}"
-        ss.run_sentiment_for_language(
-            args.input, output_dir, lang, device=device, cache_from=args.cache_from, reverse=args.reverse,
-            fix_pattern=args.fix_pattern,
-        )
-        info(f"[{lang}] done -> {output_dir}")
+    ss.run_sentiment(
+        args.input, args.output_dir, languages, device=device,
+        cache_from=args.cache_from, reverse=args.reverse, fix_pattern=args.fix_pattern,
+    )
+    info(f"done -> {args.output_dir}")
 
 
 if __name__ == "__main__":

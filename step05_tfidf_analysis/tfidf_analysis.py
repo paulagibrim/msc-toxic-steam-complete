@@ -52,26 +52,30 @@ STOPWORD_EXTRAS = {
 
 
 def load_reviews_for_language(step02_dir: Path, lang: str) -> pd.DataFrame:
-    """Reads and concatenates every review_lang=<lang> file from step02's
-    output - both toxic and non-toxic rows, unlike step03/step04's inputs.
+    """Reads every file in step02's own (flat) output and filters to this
+    language - both toxic and non-toxic rows, unlike step03/step04's
+    inputs. step02's output holds every scored language together, not one
+    file per language (see step02_run_detoxify/detoxify_scoring.py's
+    module docstring).
 
-    Re-checks perspective_declared_language == lang before returning, even
-    though step02's own detoxify_scoring.py already applies this exact
-    mask - a cheap, explicit double-check (same defense-in-depth as
-    step03/step04), not a second data-processing pass."""
-    partition_dir = step02_dir / f"review_lang={lang}"
-    files = list_parquet_files(partition_dir)
+    Applies the same review_lang == lang AND perspective_declared_language
+    == lang mask step02's own detoxify_scoring.py already applies before
+    writing - not a second data-processing pass, just what actually
+    selects this language's rows out of the shared file (same as step03's
+    text_cleaning.py and step04's sentiment_scoring.py)."""
+    files = list_parquet_files(step02_dir)
     frames = [pd.read_parquet(f) for f in files]
     df = pd.concat(frames, ignore_index=True)
 
-    rows_before_agreement = len(df)
-    df = df[df["perspective_declared_language"] == lang].reset_index(drop=True)
-    n_excluded_disagreement = rows_before_agreement - len(df)
-    if n_excluded_disagreement:
+    rows_before_mask = len(df)
+    df = df[
+        (df["review_lang"] == lang) & (df["perspective_declared_language"] == lang)
+    ].reset_index(drop=True)
+    n_excluded = rows_before_mask - len(df)
+    if n_excluded:
         info(
-            f"[{lang}] Excluding {n_excluded_disagreement} row(s) where "
-            f"perspective_declared_language != '{lang}' (unexpected - step02 "
-            f"should have already filtered these)"
+            f"[{lang}] Excluded {n_excluded} row(s) not matching "
+            f"review_lang == perspective_declared_language == '{lang}'"
         )
     return df
 

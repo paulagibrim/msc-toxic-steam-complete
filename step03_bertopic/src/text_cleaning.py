@@ -20,13 +20,12 @@ three changes to match this project's conventions:
     scoring failure as "definitely not toxic" was found to be a real bug
     when auditing tfidf_analysis.py/tag_toxicity.py earlier in this project
     and is deliberately not repeated here.
-  - Re-applies step01/step02's language-agreement mask (perspective_declared_
-    language == settings.lang_code) before anything else. step02's
-    detoxify_scoring.py already applies this same mask unconditionally
-    before scoring, so every row read here should already agree - this is
-    a cheap, explicit double-check (a `==` on a column already present),
-    not a second data-processing pass, kept in case this stage is ever
-    pointed at un-filtered input by mistake.
+  - Re-applies step01/step02's language mask (review_lang == lang_code AND
+    perspective_declared_language == lang_code) before anything else.
+    step02's own output holds every scored language together, not one file
+    per language (see step02_run_detoxify/detoxify_scoring.py's module
+    docstring) - this filter is what actually selects this language's rows
+    out of that shared file, not just a defensive double-check.
 
 Why file-by-file?
   Processing one file at a time keeps the memory footprint proportional to
@@ -49,7 +48,10 @@ from .utils import get_pandarallel_workers, timer
 logger = logging.getLogger(__name__)
 
 # Columns that must exist in every input file (step02_run_detoxify's output).
-_REQUIRED_INPUT_COLUMNS = {"review_text", "perspective_score", "detoxify_score", "perspective_declared_language"}
+_REQUIRED_INPUT_COLUMNS = {
+    "review_text", "perspective_score", "detoxify_score",
+    "perspective_declared_language", "review_lang",
+}
 
 # Columns written to each cleaned parquet file.
 _OUTPUT_COLUMNS = ["review_text_clean", "is_toxic", "review_url", "game_id"]
@@ -123,17 +125,20 @@ def _process_file(
         logger.error("Missing required columns %s in %s", missing, input_path.name)
         return {"file": input_path.name, "status": "error", "error": f"missing columns {missing}"}
 
-    # ── Language-agreement double-check ────────────────────────────────────────
-    # step02's detoxify_scoring.py already applies this exact mask before
-    # scoring, so this should be a no-op in the normal flow - kept explicit
-    # here in case this stage is ever run against un-filtered input.
+    # ── Language mask ───────────────────────────────────────────────────────────
+    # step02's own output holds every scored language together (review_lang
+    # is a plain column, not a directory partition) - this selects THIS
+    # language's rows out of it. perspective_declared_language must also
+    # agree, same union rule as step02's own agreement mask.
     rows_before_agreement = len(df)
-    df = df[df["perspective_declared_language"] == settings.lang_code]
+    df = df[
+        (df["review_lang"] == settings.lang_code)
+        & (df["perspective_declared_language"] == settings.lang_code)
+    ]
     n_excluded_disagreement = rows_before_agreement - len(df)
     if n_excluded_disagreement:
-        logger.warning(
-            "%s: excluding %d row(s) where perspective_declared_language != '%s' "
-            "(unexpected here - step02 should have already filtered these)",
+        logger.info(
+            "%s: %d row(s) filtered out (not review_lang == perspective_declared_language == '%s')",
             input_path.name, n_excluded_disagreement, settings.lang_code,
         )
 

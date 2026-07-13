@@ -8,10 +8,10 @@ Usage:
         --output-dir ../../steam-data/step05-output
 
 Defaults to both pt and en (pass --lang to override, repeatable).
-`--input` is step02's output directory (contains review_lang=<lang>
-subfolders) - unlike step03/step04, this reads EVERY review (toxic and
-non-toxic), since the whole point is comparing the two groups' term
-weights.
+`--input` is step02's output directory - review_lang is a plain column
+there, not a subfolder (see detoxify_scoring.py's module docstring) -
+unlike step03/step04, this reads EVERY review (toxic and non-toxic),
+since the whole point is comparing the two groups' term weights.
 """
 import argparse
 from pathlib import Path
@@ -28,7 +28,7 @@ def parse_args():
     )
     parser.add_argument(
         "--input", required=True, type=Path,
-        help="Path to step02's output directory (contains review_lang=<lang> subfolders)",
+        help="Path to step02's output directory",
     )
     parser.add_argument("--output-dir", required=True, type=Path, help="Directory to write outputs to")
     parser.add_argument(

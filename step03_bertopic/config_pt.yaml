@@ -23,7 +23,12 @@ seed: 42
 # ------------------------------------------------------------------------------
 paths:
   # Input: step02_run_detoxify's output for this language
-  detoxify_data_dir: "../../steam-data/step02-output-v2/review_lang=pt"
+  detoxify_data_dir: "../../steam-data/step02-output-v3/review_lang=pt"
+  # ^ points at the run that already completed under the OLD per-language-folder
+  # layout - still works fine with the new flat-aware text_cleaning.py filter
+  # (review_lang is already a column there too, just redundantly all "pt").
+  # Next time step02 runs fresh, its output will be FLAT (no /review_lang=pt
+  # suffix) - update this path then.
 
   # Stage 1 output: cleaned parquet files
   cleaned_data_dir: "../../steam-data/step03-output/pt/cleaned"
