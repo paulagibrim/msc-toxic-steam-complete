@@ -7,10 +7,12 @@ Usage:
         --output-dir ../../steam-data/step02-output
 
 Defaults to scoring both pt and en (pass --lang to override, repeatable).
-`--input` is step01's reviews_cleaned.parquet directory (contains the
-review_lang=<lang> subfolders). Output goes to
---output-dir/review_lang=<lang>/ (same filenames as the input files, so
-each is independently resumable).
+`--input` is step01's reviews_cleaned.parquet directory - review_lang is a
+plain column there, not a subfolder (see clean_reviews.py's module
+docstring), so every file holds a mix of languages and gets read once per
+--lang value processed. Output still goes to --output-dir/review_lang=<lang>/
+(same filenames as the input files, so each is independently resumable) -
+only step01's structure changed, step02's own output layout hasn't.
 
 Device auto-detects cuda > mps > cpu; pass --device to force one (e.g.
 --device cuda:0 to pin a specific GPU on a multi-GPU machine).

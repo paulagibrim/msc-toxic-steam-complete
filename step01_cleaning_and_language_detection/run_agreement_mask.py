@@ -1,8 +1,8 @@
 """CLI for agreement_mask.py - reports and saves, per language, how many
-reviews in `review_lang=<lang>` also have Steam's own declared language
+reviews with that review_lang also have Steam's own declared language
 agreeing (perspective_declared_language == lang). Doesn't save a filtered
-copy of the underlying data - the mask itself is a plain `==` on an
-already-present column, cheap enough to apply on demand wherever it's
+copy of the underlying data - the mask itself is a plain `==` on
+already-present columns, cheap enough to apply on demand wherever it's
 needed (see agreement_mask.py's module docstring) - but the small,
 aggregate per-language counts/percentages ARE saved, as a report.
 
@@ -14,8 +14,8 @@ Usage:
 Defaults to checking pt and en; pass --lang (repeatable) to override.
 
 `--input` is run_detect_language.py's output directory (the
-`reviews_cleaned.parquet` folder itself, containing the `review_lang=*`
-partitions) - not the raw reviews.
+`reviews_cleaned.parquet` folder itself - review_lang is a plain column
+there, not a directory partition) - not the raw reviews.
 """
 import argparse
 from pathlib import Path

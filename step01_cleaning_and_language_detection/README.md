@@ -163,9 +163,15 @@ Reads step 3's checkpoint (not the raw reviews) and assigns every review's
 (Dask's own worker pool parallelizes it, no separate process pool) - the
 `language` field bundled alongside the Perspective API scrape is ignored
 entirely for this (kept only as `perspective_declared_language`, for
-reference). Output has one `review_lang=<code>` folder per language
-`langdetect` actually finds - however many that turns out to be, including
-`review_lang=und` for reviews too short/low-signal to classify confidently
+reference). `review_lang` is written as a **plain column, not Hive-style
+directory partitioning** - deliberately, so re-running this step later
+(e.g. after a new boilerplate-stripping pattern is added to
+`langdetect_revalidation.py`) only ever changes review_lang's *value* for
+affected rows, never which physical file they live in. Consumers
+(`step02_run_detoxify`) filter `review_lang == lang` themselves after
+reading, the same way they already filter `perspective_declared_language`.
+However many distinct values `langdetect` finds end up in the column,
+including `und` for reviews too short/low-signal to classify confidently
 (see `clean_reviews.detect_review_language`'s docstring).
 
 **Favor many workers with modest memory each for this step** - the
@@ -228,7 +234,7 @@ Writes `language_validation_{lang}.parquet` and
 ## 6. Check langdetect/Perspective agreement (light)
 
 For pt and en (default - pass `--lang` to override), reports and **saves**
-how many reviews in step 4's `review_lang=<lang>` partitions also have the
+how many reviews with that `review_lang` also have the
 Perspective-scrape-declared language (`perspective_declared_language`)
 agreeing - i.e. both sources say the same thing. The underlying *data* is
 never duplicated - the check is a plain `==` on a column already present

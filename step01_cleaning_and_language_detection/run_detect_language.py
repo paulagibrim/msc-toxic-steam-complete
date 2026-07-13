@@ -21,13 +21,15 @@ Usage:
         --output-dir ../../steam-data/step01-output/reviews_by_lang \\
         --n-workers 32 --memory-limit 8GB
 
-No fixed language list: output has one `review_lang=<code>` folder per
-distinct language langdetect actually finds (including `und`, for reviews
-too short/low-signal to classify confidently) - see
-clean_reviews.export_reviews's docstring. export_reviews's partitioned
-write (`partition_on=["review_lang"]`) doesn't shuffle either - each
-worker splits its own partition's rows into the right subfolder(s)
-locally, no cross-worker data movement needed.
+No fixed language list: `review_lang` gets whatever value langdetect
+actually returns for each row (including `und`, for reviews too short/
+low-signal to classify confidently) - see clean_reviews.export_reviews's
+docstring. `review_lang` is written as a plain column, NOT Hive-style
+directory partitioning - so re-running this script later (e.g. after a
+new boilerplate-stripping pattern is added upstream) only ever changes
+review_lang's *value* for affected rows, never which file they live in.
+Consumers (step02_run_detoxify) filter `review_lang == lang` themselves
+after reading.
 """
 import argparse
 from pathlib import Path
@@ -44,7 +46,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output-dir", required=True, type=Path,
-        help="Directory to write reviews_cleaned.parquet (partitioned by review_lang) to",
+        help="Directory to write reviews_cleaned.parquet to (review_lang is a plain column, not a partition)",
     )
     parser.add_argument(
         "--n-workers", type=int, default=32,

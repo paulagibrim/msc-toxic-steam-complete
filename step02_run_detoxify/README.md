@@ -11,10 +11,13 @@ a GPU machine (the 2x A100 machine, not the 48-core CPU one step01 used).
 ## What it does, in order
 
 1. Reads one file at a time from step01's output
-   (`reviews_cleaned.parquet/review_lang=<lang>/*.parquet`).
-2. Applies step01's agreement mask (`perspective_declared_language == lang`
-   - langdetect already agrees, since the row is in that `review_lang=<lang>`
-   partition to begin with). Rows that fail this check are dropped.
+   (`reviews_cleaned.parquet/*.parquet`) - `review_lang` is a plain column
+   there, not a subfolder, so every file can hold a mix of languages and
+   gets read once per `--lang` value processed (e.g. twice total for the
+   pt+en default).
+2. Filters to rows where BOTH `review_lang == lang` AND
+   `perspective_declared_language == lang` (step01's agreement mask - see
+   `agreement_mask.py`). Rows that fail either check are dropped.
 3. Strips known boilerplate phrases (Steam's own early-access/refund
    notices) from a **copy** of the text used only to feed the model -
    `review_text` in the saved output is the original, untouched.
@@ -60,8 +63,8 @@ python run_detoxify.py \
   --output-dir ../../steam-data/step02-output
 ```
 
-- `--input` is step01's `reviews_cleaned.parquet` directory (the one
-  containing the `review_lang=*` subfolders) - not the raw reviews.
+- `--input` is step01's `reviews_cleaned.parquet` directory (`review_lang`
+  is a plain column there, not a subfolder) - not the raw reviews.
 - Scores both `pt` and `en` by default; pass `--lang` (repeatable) to
   restrict to just one, e.g. `--lang pt`.
 - Device auto-detects `cuda` > `mps` > `cpu`. Pass `--device cuda:0` (or
@@ -72,8 +75,12 @@ python run_detoxify.py \
 
 ## Output
 
-One output file per input file, same filename, under
-`<output-dir>/review_lang=<lang>/`:
+Unlike step01's input (flat, review_lang as a column), this step's own
+output IS still partitioned into `review_lang=<lang>/` folders - one
+output file per input file, same filename, under
+`<output-dir>/review_lang=<lang>/`. This step's data doesn't get
+reclassified the way language detection does, so the folder-partitioning
+tradeoffs that caused problems in step01 don't apply here.
 
 ```
 step02-output/

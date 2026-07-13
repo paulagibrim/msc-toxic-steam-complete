@@ -33,6 +33,7 @@ Toxicity uses the same union rule and thresholds as everywhere else in
 this project (perspective_score >= 0.7 OR detoxify_score >= 0.9, rows with
 an invalid/sentinel score excluded rather than labeled non-toxic).
 """
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -42,10 +43,31 @@ from pipeline_utils import info, list_parquet_files
 PERSPECTIVE_THRESHOLD = 0.7
 DETOXIFY_THRESHOLD = 0.9
 
+# Same boilerplate patterns stripped before scoring in step02/step03/step04/
+# step05 - review_text itself is never altered anywhere in this project, so
+# this is applied to a separate review_text_clean column here, purely so
+# examples show what the models actually saw, not a change to review_text.
+BOILERPLATE_PATTERNS = [
+    r"an[aá]lise de acesso antecipado",
+    r"produto recebido de gra[cç]a",
+    r"produto reembolsado",
+]
+
 OUTPUT_COLUMNS = [
-    "game_id", "game_name", "review_url", "review_text", "review_lang",
+    "game_id", "game_name", "review_url", "review_text", "review_text_clean", "review_lang",
     "perspective_score", "detoxify_score", "sentiment_score", "topic",
 ]
+
+
+def clean_review_text(text):
+    """Strips known boilerplate phrases from review text (case-insensitive).
+    Non-string input (e.g. NaN) passes through unchanged. Same logic as
+    detoxify_scoring.py/sentiment_scoring.py's clean_review_text."""
+    if not isinstance(text, str):
+        return text
+    for pattern in BOILERPLATE_PATTERNS:
+        text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def load_games(games_path: Path) -> pd.DataFrame:
@@ -204,6 +226,7 @@ def get_review_examples(
     info(f"[{lang}] {len(filtered)} review(s) match (toxic={toxic}, contains={contains!r}, game_tag={game_tag!r})")
 
     sample = sample_reviews(filtered, n=n, seed=seed)
+    sample["review_text_clean"] = sample["review_text"].apply(clean_review_text)
     sample = attach_game_names(sample, games)
     sample = attach_sentiment(sample, step04_dir, lang)
     sample = attach_topics(sample, step03_results_path)

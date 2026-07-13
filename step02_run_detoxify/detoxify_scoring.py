@@ -1,8 +1,21 @@
-"""Runs Detoxify on step01's cleaned+language-partitioned reviews
-(reviews_cleaned.parquet/review_lang=<lang>/*.parquet), one file at a time,
-after applying step01's agreement mask (langdetect AND the
-Perspective-scrape-declared language must agree - see
-step01_cleaning_and_language_detection/agreement_mask.py).
+"""Runs Detoxify on step01's cleaned reviews (reviews_cleaned.parquet/
+*.parquet), one file at a time, keeping only rows that pass BOTH: langdetect
+says `review_lang == lang`, AND Perspective's own declared language also
+agrees (`perspective_declared_language == lang`) - see
+step01_cleaning_and_language_detection/agreement_mask.py.
+
+review_lang is a plain column in step01's output, not a directory
+partition (see clean_reviews.export_reviews's docstring) - so every source
+file can contain a mix of languages, and this filters `review_lang == lang`
+itself on every read, the same way it already filtered
+`perspective_declared_language == lang`. This means each source file gets
+read once per language processed (e.g. twice total for pt + en) - a real
+but deliberate I/O cost, in exchange for language reclassification (e.g. a
+new boilerplate pattern added to langdetect_revalidation.py) never again
+requiring reviews to physically move between files/folders - see this
+project's actual "produto reembolsado" incident, where Hive-style
+partitioning by review_lang caused reprocessed reviews to silently keep
+stale results under file-based resumability.
 
 Per explicit user request, only Detoxify's `toxicity` output is kept - not
 the other six sub-scores (severe_toxicity, obscene, identity_attack,
@@ -51,10 +64,14 @@ def clean_review_text(text):
 
 
 def apply_agreement_mask(df: pd.DataFrame, lang: str) -> pd.DataFrame:
-    """Same check as step01's agreement_mask.py: keeps only rows where the
-    Perspective-scrape-declared language also equals `lang` - langdetect
-    already agrees, since `df` comes from one `review_lang=<lang>` file."""
-    return df[df["perspective_declared_language"] == lang]
+    """Keeps only rows where BOTH langdetect's own `review_lang` AND
+    Perspective's declared language equal `lang`. Since review_lang is a
+    plain column (not a directory partition - see clean_reviews.py's
+    module docstring), a source file can hold any mix of languages, so the
+    review_lang check is just as necessary here as the
+    perspective_declared_language one - neither is guaranteed by which
+    file `df` came from."""
+    return df[(df["review_lang"] == lang) & (df["perspective_declared_language"] == lang)]
 
 
 def load_score_cache(old_output_dir: Path, lang: str, exclude_pattern: str = None) -> dict:
@@ -231,8 +248,14 @@ def run_detoxify_for_language(
     reviews_cleaned_dir: Path, output_dir: Path, lang: str, device=None, cache_from: Path = None,
     cache_exclude_pattern: str = None, fix_pattern: str = None,
 ) -> list:
-    """Scores every file in review_lang=<lang>, resuming per-file. A
+    """Scores every file under reviews_cleaned_dir, resuming per-file. A
     failure on one file is logged and skipped rather than aborting the run.
+
+    reviews_cleaned_dir holds every language's reviews together (review_lang
+    is a plain column, not a directory partition - see clean_reviews.py's
+    module docstring), so every file is read once per language processed
+    (apply_agreement_mask filters review_lang == lang inside score_file) -
+    this function itself doesn't pre-filter which files to look at.
 
     cache_from: optional path to an already-scored step02 output directory
     (see load_score_cache) - reused so re-scoring after an upstream fix
@@ -246,8 +269,7 @@ def run_detoxify_for_language(
     fix_pattern: optional regex - patches already-scored output files IN
     PLACE (same --output-dir, no cache_from/moving anything aside needed).
     See score_file's docstring."""
-    partition_dir = reviews_cleaned_dir / f"review_lang={lang}"
-    files = list_parquet_files(partition_dir)
+    files = list_parquet_files(reviews_cleaned_dir)
 
     cache = load_score_cache(cache_from, lang, exclude_pattern=cache_exclude_pattern) if cache_from else {}
 

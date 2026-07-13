@@ -32,13 +32,20 @@ shuffle only ever runs once, checkpointed to disk by
 run_clean_reviews_dedup.py's export_deduped - if language detection needs
 retuning or crashes, the dedup step never needs to be redone.
 
-`review_lang` (the column export_reviews partitions by) is not Steam's own
-declared `language` field - per explicit user decision, that field is
-untrustworthy (see langdetect_revalidation.py's module docstring: manual
-inspection found genuinely English reviews filed under Steam's "pt" label)
-and is, for now, ignored entirely for this purpose. Steam's original field
-is kept under `perspective_declared_language`, for reference/comparison,
-but no longer drives which language folder a review ends up in.
+`review_lang` is not Steam's own declared `language` field - per explicit
+user decision, that field is untrustworthy (see langdetect_revalidation.py's
+module docstring: manual inspection found genuinely English reviews filed
+under Steam's "pt" label) and is, for now, ignored entirely for this
+purpose. Steam's original field is kept under `perspective_declared_language`,
+for reference/comparison, but doesn't drive review_lang's value.
+
+`review_lang` is written as a plain column, NOT as Hive-style directory
+partitioning - see export_reviews's docstring for why (in short: so a
+future re-run of language detection, e.g. after a new boilerplate pattern
+is added, only ever changes review_lang's *value* for affected rows,
+never which physical file they live in - avoiding a real incident where
+downstream steps' filename-based resumability silently kept stale results
+for reviews that had actually been reclassified).
 """
 import hashlib
 import os
@@ -247,8 +254,7 @@ def dedup_buckets(buckets_dir: Path, output_dir: Path, n_jobs: int = None) -> di
 
 def export_deduped(df, output_path: Path) -> Path:
     """Stage 1's checkpoint: the cleaned+deduped reviews, written to disk
-    before language detection ever runs - not partitioned by review_lang
-    yet (that only exists after stage 2). Whatever the dedup shuffle
+    before language detection ever runs. Whatever the dedup shuffle
     naturally settles on as the partition count is what gets written, one
     file per partition, same as any other Dask to_parquet call without
     partition_on."""
@@ -287,7 +293,7 @@ def detect_review_language(df):
     Rows langdetect can't confidently classify at all (too short/no real
     alphabetic content after cleaning - see identify_language_langdetect's
     min_alpha_length) get `review_lang="und"` - export_reviews doesn't
-    filter these out, so they get their own `review_lang=und` folder like
+    filter these out, so they get the same `review_lang="und"` value as
     any other detected language, rather than being silently dropped.
     """
     meta = df._meta.assign(
@@ -298,17 +304,28 @@ def detect_review_language(df):
 
 
 def export_reviews(df, processed_reviews_dir: Path):
-    """Writes one folder per distinct `review_lang` value actually present
-    in `df` (whatever langdetect detected - no fixed language list), each
-    folder containing only reviews langdetect assigned to that language."""
+    """Writes `review_lang` as a plain column, NOT as Hive-style directory
+    partitioning (partition_on) - deliberately, so re-running language
+    detection later (e.g. after a new boilerplate-stripping pattern is
+    added to langdetect_revalidation.py) only ever changes the *value* of
+    review_lang for affected rows, never which physical file/folder a row
+    lives in. Partitioning by review_lang meant a review whose detected
+    language changed on a later run physically moved to a different
+    folder - every downstream consumer's "skip if this filename already
+    has output" resumability logic then had no way to tell "this file's
+    rows are unchanged" from "this file now holds a different review_lang
+    mix after reclassification", causing reprocessed reviews to silently
+    keep stale results (see this project's actual "produto reembolsado"
+    incident). Consumers (step02_run_detoxify) now filter
+    `df["review_lang"] == lang` themselves after reading, the same way
+    they already filter `perspective_declared_language == lang`."""
     processed_reviews_dir.mkdir(parents=True, exist_ok=True)
     output_path = processed_reviews_dir / "reviews_cleaned.parquet"
 
     df.to_parquet(
         output_path,
-        partition_on=["review_lang"],
         write_index=False,
         engine="pyarrow",
     )
-    info(f"Exported cleaned reviews dataframe to: {output_path} (partitioned by review_lang)")
+    info(f"Exported cleaned reviews dataframe to: {output_path} (review_lang is a column, not a partition)")
     return output_path
