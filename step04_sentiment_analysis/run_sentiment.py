@@ -27,6 +27,12 @@ forward run, to work through the same file list from both ends at once -
 e.g.:
     python run_sentiment.py --lang en --device cuda:0 ...            # forward
     python run_sentiment.py --lang en --device cuda:1 --reverse ...  # backward
+
+--fix-pattern: optional regex - patches already-scored files IN PLACE,
+directly against the SAME --output-dir (no --cache-from, no moving
+anything aside first). Rows whose review_text matches the pattern are
+re-scored; everything else in the file is left untouched. Simplest way to
+apply a newly-added BOILERPLATE_PATTERNS entry to already-scored data.
 """
 import argparse
 from pathlib import Path
@@ -64,6 +70,12 @@ def parse_args():
         help="Process files last-to-first - run alongside a normal forward run "
         "(ideally on a different --device) to work through the file list from both ends.",
     )
+    parser.add_argument(
+        "--fix-pattern", default=None,
+        help="Regex - patches already-scored files in place (same --output-dir): "
+        "rows whose review_text matches this are re-scored, everything else in the "
+        "file is left untouched. Optional.",
+    )
     return parser.parse_args()
 
 
@@ -79,7 +91,8 @@ def main():
     for lang in languages:
         output_dir = args.output_dir / f"review_lang={lang}"
         ss.run_sentiment_for_language(
-            args.input, output_dir, lang, device=device, cache_from=args.cache_from, reverse=args.reverse
+            args.input, output_dir, lang, device=device, cache_from=args.cache_from, reverse=args.reverse,
+            fix_pattern=args.fix_pattern,
         )
         info(f"[{lang}] done -> {output_dir}")
 

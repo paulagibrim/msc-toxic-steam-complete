@@ -113,6 +113,27 @@ def _score_batch(texts, tokenizer, model, device) -> list:
     return scores.cpu().tolist()
 
 
+def _score_texts(texts: list, tokenizer, model, device, batch_size: int) -> list:
+    """Runs the sentiment model in batches over already-cleaned texts,
+    returning one continuous score per text (FAILED_SCORE_SENTINEL on
+    batch failure)."""
+    scores = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        try:
+            scores.extend(_score_batch(batch, tokenizer, model, device))
+        except Exception as e:
+            error(f"Batch starting at row {i} failed: {e}")
+            scores.extend([FAILED_SCORE_SENTINEL] * len(batch))
+        if device.type == "mps":
+            import torch
+            torch.mps.empty_cache()
+        elif device.type == "cuda":
+            import torch
+            torch.cuda.empty_cache()
+    return scores
+
+
 def score_file(
     file_path: Path,
     output_dir: Path,
@@ -122,6 +143,7 @@ def score_file(
     batch_size: int = BATCH_SIZE,
     max_chars: int = MAX_CHARS,
     cache: dict = None,
+    fix_pattern: str = None,
 ) -> Path:
     """Scores one review_lang=<lang> file, writing every column already in
     the file plus the new `sentiment_score` to `output_dir` under the same
@@ -129,10 +151,38 @@ def score_file(
 
     If `cache` (a review_url -> sentiment_score dict, see load_score_cache)
     is given, rows whose review_url is already in it reuse that score
-    instead of running the model again."""
+    instead of running the model again.
+
+    If `fix_pattern` is given AND the output file already exists, checks
+    whether any of ITS rows have review_text matching that pattern
+    (scored before a BOILERPLATE_PATTERNS entry was added). If none match,
+    the file is skipped as usual. If some do, ONLY those rows are
+    re-scored and the file is overwritten in place - everything else in it
+    is untouched. Lets a boilerplate-pattern fix be applied directly
+    against the same --output-dir, without moving anything aside first."""
     output_path = output_dir / file_path.name
+
     if output_path.exists():
-        info(f"Skipping {file_path.name} (already scored)")
+        if not fix_pattern:
+            info(f"Skipping {file_path.name} (already scored)")
+            return output_path
+
+        existing = pd.read_parquet(output_path)
+        affected_mask = existing["review_text"].str.contains(fix_pattern, case=False, na=False, regex=True)
+        n_affected = int(affected_mask.sum())
+        if n_affected == 0:
+            info(f"Skipping {file_path.name} (already scored, no rows match fix_pattern)")
+            return output_path
+
+        info(f"{file_path.name}: {n_affected} already-scored row(s) match fix_pattern - re-scoring in place")
+        texts = (
+            existing.loc[affected_mask, "review_text"]
+            .apply(clean_review_text).fillna("").astype(str).str.slice(0, max_chars).tolist()
+        )
+        new_scores = _score_texts(texts, tokenizer, model, device, batch_size)
+        existing.loc[affected_mask, "sentiment_score"] = new_scores
+        existing.to_parquet(output_path, engine="pyarrow", index=False)
+        info(f"Patched {n_affected} row(s) in {file_path.name} -> {output_path}")
         return output_path
 
     warn_if_not_materialized(file_path)
@@ -158,22 +208,7 @@ def score_file(
             df.loc[to_score_idx, "review_text"]
             .apply(clean_review_text).fillna("").astype(str).str.slice(0, max_chars).tolist()
         )
-        new_scores = []
-
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            try:
-                new_scores.extend(_score_batch(batch, tokenizer, model, device))
-            except Exception as e:
-                error(f"Batch starting at row {i} failed: {e}")
-                new_scores.extend([FAILED_SCORE_SENTINEL] * len(batch))
-            if device.type == "mps":
-                import torch
-                torch.mps.empty_cache()
-            elif device.type == "cuda":
-                import torch
-                torch.cuda.empty_cache()
-
+        new_scores = _score_texts(texts, tokenizer, model, device, batch_size)
         for pos, idx in enumerate(to_score_idx):
             final_scores[idx] = new_scores[pos]
 
@@ -188,7 +223,8 @@ def score_file(
 
 
 def run_sentiment_for_language(
-    reviews_dir: Path, output_dir: Path, lang: str, device=None, cache_from: Path = None, reverse: bool = False
+    reviews_dir: Path, output_dir: Path, lang: str, device=None, cache_from: Path = None, reverse: bool = False,
+    fix_pattern: str = None,
 ) -> list:
     """Scores every file in review_lang=<lang>, resuming per-file. A
     failure on one file is logged and skipped rather than aborting the run.
@@ -196,6 +232,10 @@ def run_sentiment_for_language(
     cache_from: optional path to an already-scored step04 output directory
     (see load_score_cache) - reused so re-scoring after an upstream fix
     doesn't re-run the model on reviews it already scored.
+
+    fix_pattern: optional regex - patches already-scored output files IN
+    PLACE (same --output-dir, no cache_from/moving anything aside needed).
+    See score_file's docstring.
 
     reverse: process files last-to-first instead of first-to-last. Lets a
     second process (ideally pinned to the other GPU via --device) work
@@ -220,7 +260,9 @@ def run_sentiment_for_language(
     for i, f in enumerate(files, start=1):
         info(f"[{lang}] [{i}/{len(files)}] {f.name}")
         try:
-            output_paths.append(score_file(f, output_dir, tokenizer, model, device, cache=cache))
+            output_paths.append(
+                score_file(f, output_dir, tokenizer, model, device, cache=cache, fix_pattern=fix_pattern)
+            )
         except Exception as e:
             error(f"[{lang}] Fatal error on {f.name}: {e} - skipping to next file")
             continue
