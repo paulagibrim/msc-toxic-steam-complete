@@ -72,9 +72,17 @@ def parse_args():
 def load_users_in_scope(step02_dir: Path) -> set:
     """The users step06 will actually analyze: everyone appearing in step02's
     scored output. Used to scope both counting sweeps below, so memory stays
-    proportional to this (much smaller) roster rather than the full corpus."""
-    files = sorted(step02_dir.glob("*.parquet"))
+    proportional to this (much smaller) roster rather than the full corpus.
+
+    Globs recursively - step02 writes one review_lang=<lang>/ subfolder per
+    language, so the parquet files aren't directly under step02_dir."""
+    files = sorted(step02_dir.rglob("*.parquet"))
     info(f"[scope] Reading user roster from {len(files)} step02 file(s)...")
+    if not files:
+        raise FileNotFoundError(
+            f"No .parquet files found under {step02_dir} (searched recursively). "
+            "Check the path - this should be step02's output directory."
+        )
 
     users = set()
     for i, f in enumerate(files, start=1):
@@ -92,8 +100,10 @@ def count_per_user(directory: Path, label: str, users_in_scope: set, languages: 
     Shuffle-free by construction: each file is reduced to its own per-user
     counts (much smaller than the file itself), and those are added into a
     running total - see module docstring for why this matters."""
-    files = sorted(directory.glob("*.parquet"))
+    files = sorted(directory.rglob("*.parquet"))
     info(f"[{label}] Counting across {len(files)} file(s)...")
+    if not files:
+        raise FileNotFoundError(f"No .parquet files found under {directory} (searched recursively).")
 
     columns = ["user_url"] + (["review_lang"] if languages else [])
     totals = pd.Series(dtype="int64")
@@ -121,6 +131,11 @@ def main():
 
     total_per_user = count_per_user(args.deduped, "all languages", users_in_scope)
     info(f"Counted total (all-language) reviews for {len(total_per_user)} in-scope user(s)")
+    if total_per_user.empty:
+        raise SystemExit(
+            "No in-scope user was found in --deduped. This usually means step02's user_url values "
+            "don't match step01's (check that --deduped points at the same corpus step02 came from)."
+        )
 
     pt_en_per_user = count_per_user(args.reviews_by_lang, "pt/en", users_in_scope, languages=LANGUAGES)
     info(f"Counted pt/en reviews for {len(pt_en_per_user)} in-scope user(s)")
