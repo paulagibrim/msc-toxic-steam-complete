@@ -12,12 +12,12 @@ across the corpus - see this script's console/JSON output for how many
 users clear 50%/70%/80%/90%/95%/100% pt/en coverage - so the threshold
 used later can be chosen from real data.
 
-Deliberately uses Stage 2's own language assignment (review_lang, from
-reviews_by_lang/reviews_cleaned.parquet) - NOT step02's agreement-mask-
-filtered output. This is a pure "how much of this user's activity is in
-these languages" question, decoupled from whether Perspective's declared
-language also agrees (a separate, stricter concern - see step01's
-agreement_mask.py).
+Deliberately uses Stage 2's own language assignment (review_lang, a plain
+column in reviews_by_lang/reviews_cleaned.parquet) - NOT step02's
+agreement-mask-filtered output. This is a pure "how much of this user's
+activity is in these languages" question, decoupled from whether
+Perspective's declared language also agrees (a separate, stricter concern -
+see step01's agreement_mask.py).
 
 Usage:
     python run_language_coverage_diagnostic.py \\
@@ -92,11 +92,11 @@ def main():
         info(f"{len(total_per_user)} unique user(s) found across all languages")
 
         info("Counting pt/en reviews per user...")
-        pt_en_frames = [
-            dd.read_parquet(str(args.reviews_by_lang / f"review_lang={lang}"), columns=["user_url"])
-            for lang in ["pt", "en"]
-        ]
-        pt_en_per_user = dd.concat(pt_en_frames).groupby("user_url").size().compute()
+        # review_lang is a plain column in Stage 2's output, not a directory
+        # partition - filter on it rather than reading per-language folders.
+        by_lang = dd.read_parquet(str(args.reviews_by_lang), columns=["user_url", "review_lang"])
+        pt_en = by_lang[by_lang["review_lang"].isin(["pt", "en"])]
+        pt_en_per_user = pt_en.groupby("user_url").size().compute()
         info(f"{len(pt_en_per_user)} unique user(s) found with at least one pt/en review")
     finally:
         client.close()
