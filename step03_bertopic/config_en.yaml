@@ -23,12 +23,11 @@ seed: 42
 # ------------------------------------------------------------------------------
 paths:
   # Input: step02_run_detoxify's output for this language
-  detoxify_data_dir: "../../steam-data/step02-output-v3/review_lang=en"
-  # ^ points at the run that already completed under the OLD per-language-folder
-  # layout - still works fine with the new flat-aware text_cleaning.py filter
-  # (review_lang is already a column there too, just redundantly all "en").
-  # Next time step02 runs fresh, its output will be FLAT (no /review_lang=en
-  # suffix) - update this path then.
+  detoxify_data_dir: "../../steam-data/step02-output/review_lang=en"
+  # ^ the v3 run kept as-is (already based on step01's corrected langdetect
+  # output, no need to re-score), moved here from step02-output-v3 for a
+  # consistent step02-output/review_lang=<lang> layout - review_lang is a
+  # real column inside, just redundantly all "en".
 
   # Stage 1 output: cleaned parquet files
   cleaned_data_dir: "../../steam-data/step03-output/en/cleaned"
@@ -109,10 +108,16 @@ optuna:
   # A fraction keeps search coverage proportionally identical between pt
   # and en regardless of each corpus's absolute size (a fixed N represents
   # a different share of each language's total, which would make the two
-  # language pipelines methodologically incomparable). 10% matches the
-  # smallest rung of stability.sample_fractions below, so the hyperparameters
+  # language pipelines methodologically incomparable). 30% matches the
+  # third rung of stability.sample_fractions below, so the hyperparameters
   # found here are evaluated at a sample size stability analysis also tests.
-  optuna_sample_fraction: 0.1
+  # Raised from 10% after this search picked params that cleared min_topics
+  # on a 10% sample but collapsed to just 6 topics once trained on the full
+  # corpus - HDBSCAN's absolute min_cluster_size threshold behaves
+  # differently at 10x the data (regions distinct in a small sample can
+  # merge into one basin at full scale), so a bigger search sample
+  # generalizes to the final full-corpus training more reliably.
+  optuna_sample_fraction: 0.3
   coherence_metric: "c_npmi"
   top_n_words: 10
   coherence_weight: 1.0
