@@ -98,15 +98,23 @@ def count_per_user(directory: Path, label: str, users_in_scope: set, languages: 
     `languages` is given, only rows whose review_lang is in that list count.
 
     Shuffle-free by construction: each file is reduced to its own per-user
-    counts (much smaller than the file itself), and those are added into a
-    running total - see module docstring for why this matters."""
+    counts (much smaller than the file itself) - see module docstring for
+    why avoiding Dask's distributed groupby matters here.
+
+    The per-file counts are collected in a list and summed ONCE at the end,
+    rather than folded into a running Series per file. Folding per file
+    means realigning a Series that grows toward ~10M string-keyed entries,
+    once per file - the alignment cost scales with the accumulated size, so
+    it gets progressively slower as the sweep proceeds (measured: ~5 minutes
+    for the first 20 of 200 files). Concatenating first and grouping once
+    pays that alignment cost a single time."""
     files = sorted(directory.rglob("*.parquet"))
     info(f"[{label}] Counting across {len(files)} file(s)...")
     if not files:
         raise FileNotFoundError(f"No .parquet files found under {directory} (searched recursively).")
 
     columns = ["user_url"] + (["review_lang"] if languages else [])
-    totals = pd.Series(dtype="int64")
+    partial_counts = []
 
     for i, f in enumerate(files, start=1):
         df = pd.read_parquet(f, columns=columns)
@@ -114,12 +122,14 @@ def count_per_user(directory: Path, label: str, users_in_scope: set, languages: 
         if languages:
             df = df[df["review_lang"].isin(languages)]
 
-        counts = df["user_url"].value_counts()
-        totals = totals.add(counts, fill_value=0)
+        partial_counts.append(df["user_url"].value_counts())
 
         if i % 20 == 0 or i == len(files):
-            info(f"[{label}] [{i}/{len(files)}] {len(totals)} unique user(s) so far")
+            info(f"[{label}] [{i}/{len(files)}] file(s) read")
 
+    info(f"[{label}] Summing per-file counts...")
+    totals = pd.concat(partial_counts).groupby(level=0).sum()
+    info(f"[{label}] {len(totals)} of {len(users_in_scope)} in-scope user(s) have at least one matching review")
     return totals.astype("int64")
 
 
