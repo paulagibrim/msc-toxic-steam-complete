@@ -1,16 +1,29 @@
 """Diagnostic (read-only, changes nothing): for every user who actually
 reaches step06's analysis (i.e. appears in step02's scored output), computes
 what fraction of their TOTAL reviews - across every language, from step01's
-pre-language-split checkpoint - are in pt or en.
+pre-language-split checkpoint - are in pt and/or en.
 
 Purpose: deciding a coverage threshold for which users are "represented
-well enough" by pt/en to include in step06's analysis - e.g. a user with
-100 reviews total but only 5 in pt/en would have their toxic-rate computed
-from a small, unrepresentative slice of their real activity. Rather than
-guessing a cutoff (e.g. "90%"), this reports the actual distribution - see
-this script's console/JSON output for how many users clear 50%/70%/80%/
-90%/95%/100% pt/en coverage - so the threshold used later can be chosen
-from real data.
+well enough" by the languages this project analyzes - e.g. a user with 100
+reviews total but only 5 in pt/en would have their toxic-rate computed from
+a small, unrepresentative slice of their real activity. Rather than guessing
+a cutoff (e.g. "90%"), this reports the actual distribution - how many users
+clear 50%/70%/80%/90%/95%/100% coverage - so the threshold used later can be
+chosen from real data.
+
+THREE VIEWS ARE REPORTED, and they answer different questions:
+  - "pt+en" (combined): how much of this user's activity is in EITHER
+    language - i.e. "is this user well covered by the languages we analyze
+    at all". The right view if a user's pt and en reviews are pooled into
+    one profile.
+  - "pt" and "en" (individual): how much of this user's activity is
+    specifically in that one language - a per-language "purity" view. The
+    right view if each language gets its own model and a user should belong
+    clearly to one of them.
+These differ for bilingual users: someone with half their reviews in pt and
+half in en scores 100% on the combined view but only 50% on each individual
+one, and would be excluded from BOTH languages by a strict per-language
+threshold despite being entirely within the studied languages.
 
 WHY THE TWO INPUTS ARE BOTH NEEDED: step02's output is already
 language-filtered (pt/en only, agreement-masked), so it alone can't answer
@@ -92,10 +105,10 @@ def load_users_in_scope(step02_dir: Path) -> set:
     return users
 
 
-def count_per_user(directory: Path, label: str, users_in_scope: set, languages: list = None) -> pd.Series:
+def count_per_user(directory: Path, label: str, users_in_scope: set) -> pd.Series:
     """Sums per-user review counts across every parquet file in `directory`,
-    one file at a time, counting only users in `users_in_scope`. If
-    `languages` is given, only rows whose review_lang is in that list count.
+    one file at a time, counting only users in `users_in_scope` - the
+    denominator (a user's reviews in EVERY language).
 
     Shuffle-free by construction: each file is reduced to its own per-user
     counts (much smaller than the file itself) - see module docstring for
@@ -113,15 +126,10 @@ def count_per_user(directory: Path, label: str, users_in_scope: set, languages: 
     if not files:
         raise FileNotFoundError(f"No .parquet files found under {directory} (searched recursively).")
 
-    columns = ["user_url"] + (["review_lang"] if languages else [])
     partial_counts = []
-
     for i, f in enumerate(files, start=1):
-        df = pd.read_parquet(f, columns=columns)
+        df = pd.read_parquet(f, columns=["user_url"])
         df = df[df["user_url"].isin(users_in_scope)]
-        if languages:
-            df = df[df["review_lang"].isin(languages)]
-
         partial_counts.append(df["user_url"].value_counts())
 
         if i % 20 == 0 or i == len(files):
@@ -131,6 +139,75 @@ def count_per_user(directory: Path, label: str, users_in_scope: set, languages: 
     totals = pd.concat(partial_counts).groupby(level=0).sum()
     info(f"[{label}] {len(totals)} of {len(users_in_scope)} in-scope user(s) have at least one matching review")
     return totals.astype("int64")
+
+
+def count_per_user_by_language(directory: Path, users_in_scope: set, languages: list) -> dict:
+    """Per-user review counts for EACH language separately, plus their
+    combined total - all from a single sweep over the files (each file is
+    read once and counted per-language, rather than re-reading the corpus
+    once per language).
+
+    Returns {"pt": Series, "en": Series, "pt+en": Series} - the individual
+    languages support a per-language "purity" view (how much of this user's
+    activity is specifically in pt, or specifically in en), while "pt+en"
+    is the combined coverage view (how much is in either). A bilingual user
+    with half their reviews in each scores 100% combined but only 50% on
+    each individual language - see this script's report for both."""
+    files = sorted(directory.rglob("*.parquet"))
+    info(f"[by-language] Counting across {len(files)} file(s)...")
+    if not files:
+        raise FileNotFoundError(f"No .parquet files found under {directory} (searched recursively).")
+
+    partials = {lang: [] for lang in languages}
+
+    for i, f in enumerate(files, start=1):
+        df = pd.read_parquet(f, columns=["user_url", "review_lang"])
+        df = df[df["user_url"].isin(users_in_scope)]
+
+        for lang in languages:
+            partials[lang].append(df.loc[df["review_lang"] == lang, "user_url"].value_counts())
+
+        if i % 20 == 0 or i == len(files):
+            info(f"[by-language] [{i}/{len(files)}] file(s) read")
+
+    info("[by-language] Summing per-file counts...")
+    counts = {}
+    for lang in languages:
+        counts[lang] = pd.concat(partials[lang]).groupby(level=0).sum().astype("int64")
+        info(f"[by-language] {lang}: {len(counts[lang])} in-scope user(s) have at least one {lang} review")
+
+    combined_label = "+".join(languages)
+    combined = pd.concat([counts[lang] for lang in languages]).groupby(level=0).sum().astype("int64")
+    counts[combined_label] = combined
+    info(f"[by-language] {combined_label}: {len(combined)} in-scope user(s) have at least one matching review")
+
+    return counts
+
+
+def summarize_coverage(numerator: pd.Series, denominator: pd.Series, label: str) -> dict:
+    """Coverage distribution + per-threshold user counts for one numerator
+    (e.g. a user's pt reviews, or their pt+en reviews) over the same
+    all-language denominator. reindex(fill_value=0) so an in-scope user with
+    none of these reviews still appears (as 0% coverage) instead of dropping
+    out of the distribution entirely."""
+    coverage = numerator.reindex(denominator.index, fill_value=0) / denominator
+
+    describe = coverage.describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99])
+    info(f"=== Coverage distribution: fraction of an in-scope user's total reviews that are {label} ===")
+    print(describe.to_string())
+
+    threshold_counts = {}
+    for t in THRESHOLDS:
+        n = int((coverage >= t).sum())
+        pct = 100 * n / len(coverage)
+        threshold_counts[f">={int(t * 100)}%"] = {"n_users": n, "pct_of_in_scope_users": round(pct, 2)}
+        info(f"  [{label}] >= {int(t * 100)}% coverage: {n} user(s) ({pct:.2f}% of in-scope users)")
+
+    return {
+        "users_counted": int(len(coverage)),
+        "coverage_describe": describe.to_dict(),
+        "threshold_counts": threshold_counts,
+    }
 
 
 def main():
@@ -147,29 +224,23 @@ def main():
             "don't match step01's (check that --deduped points at the same corpus step02 came from)."
         )
 
-    pt_en_per_user = count_per_user(args.reviews_by_lang, "pt/en", users_in_scope, languages=LANGUAGES)
-    info(f"Counted pt/en reviews for {len(pt_en_per_user)} in-scope user(s)")
+    # One sweep, counted per-language AND combined - the combined view
+    # ("pt+en") answers "is this user well covered by the languages we
+    # analyze at all", while the individual ones answer "how much of this
+    # user's activity is specifically in this language". They differ for
+    # bilingual users: someone half pt / half en is 100% combined but only
+    # 50% on each language alone.
+    by_lang = count_per_user_by_language(args.reviews_by_lang, users_in_scope, LANGUAGES)
 
-    # reindex(fill_value=0) so an in-scope user with no pt/en reviews counted
-    # here still appears (as 0% coverage) instead of dropping out entirely.
-    coverage = pt_en_per_user.reindex(total_per_user.index, fill_value=0) / total_per_user
-
-    describe = coverage.describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99])
-    info("Coverage distribution (fraction of an in-scope user's total reviews that are pt/en):")
-    print(describe.to_string())
-
-    threshold_counts = {}
-    for t in THRESHOLDS:
-        n = int((coverage >= t).sum())
-        pct = 100 * n / len(coverage)
-        threshold_counts[f">={int(t * 100)}%"] = {"n_users": n, "pct_of_in_scope_users": round(pct, 2)}
-        info(f"  >= {int(t * 100)}% pt/en coverage: {n} user(s) ({pct:.2f}% of in-scope users)")
+    combined_label = "+".join(LANGUAGES)
+    views = {}
+    for label in [combined_label] + LANGUAGES:
+        views[label] = summarize_coverage(by_lang[label], total_per_user, label)
 
     report = {
         "users_in_scope": int(len(users_in_scope)),
-        "users_counted": int(len(coverage)),
-        "coverage_describe": describe.to_dict(),
-        "threshold_counts": threshold_counts,
+        "combined_view": combined_label,
+        "views": views,
     }
     save_summary(report, args.output)
 
