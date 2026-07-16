@@ -122,6 +122,17 @@ def main():
     def pct_of_und(n):
         return round(100 * n / und_total, 4) if und_total else 0.0
 
+    # Every percentage names its own denominator, so no field's meaning
+    # depends on where it sits in the tree - `empty_after_cleaning` is
+    # nested under the gated bucket and is reported as a share of it, which
+    # a bare "pct" (or a second "pct_of_und") next to the parent's own
+    # percentage reads as ambiguous. The two denominators happen to give
+    # near-identical values here (the gate is 99.96% of und), so the
+    # ambiguity is invisible in the numbers themselves.
+    def pct_of_gated(n):
+        gated = totals["und_gated"]
+        return round(100 * n / gated, 4) if gated else 0.0
+
     report = {
         "files_scanned": len(files),
         "rows_scanned": rows_scanned,
@@ -135,7 +146,7 @@ def main():
                 "pct_of_und": pct_of_und(totals["und_gated"]),
                 "empty_after_cleaning": {
                     "count": totals["und_gated_empty_after_cleaning"],
-                    "pct_of_und": pct_of_und(totals["und_gated_empty_after_cleaning"]),
+                    "pct_of_gated": pct_of_gated(totals["und_gated_empty_after_cleaning"]),
                 },
             },
             "langdetect_exception": {
