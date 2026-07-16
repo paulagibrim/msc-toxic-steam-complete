@@ -46,8 +46,14 @@ def apply_agreement_mask(df, lang: str):
 def summarize_agreement(df, lang: str) -> dict:
     """Computes agreement counts/percentage for one language partition,
     without keeping the filtered rows around - just the numbers."""
+    # Counted by reducing the mask itself, NOT by len(apply_agreement_mask(df,
+    # lang)) - indexing an already-filtered Dask frame with a mask derived from
+    # that same frame misaligns partitions under Dask's query planner (observed
+    # on 2026.3.0: IndexError, "boolean index did not match indexed array",
+    # with a different reported size on every run). Summing the boolean is also
+    # cheaper, since it never materializes the matching rows.
     rows_total = len(df)
-    rows_agree = len(apply_agreement_mask(df, lang))
+    rows_agree = int((df["perspective_declared_language"] == lang).sum().compute())
     rows_disagree = rows_total - rows_agree
     agree_pct = 100 * rows_agree / rows_total if rows_total else 0.0
 
