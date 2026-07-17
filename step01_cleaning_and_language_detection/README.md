@@ -255,6 +255,65 @@ python run_agreement_mask.py \
 raw reviews). Writes `agreement_report.json` - `rows_total`, `rows_agree`,
 `rows_disagree`, `agree_pct` per language.
 
+## 7. Break down the `und` label (light)
+
+Step 4 assigns `review_lang="und"` from three different conditions, which
+are indistinguishable in the output (same label, same `0.0` confidence):
+the text was gated out before langdetect ran (fewer than
+`MIN_ALPHA_LENGTH` alphabetic characters), langdetect raised, or langdetect
+returned no candidate. The distinction matters for reporting - "we declined
+to ask the model" and "we asked and it failed" are different claims.
+
+```bash
+python run_und_breakdown.py \
+  --input ../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \
+  --output ../../steam-data/step01-output/und_breakdown_report.json
+```
+
+Cheap despite the corpus size (~35s on 12 cores): separating the gated rows
+needs no model call, just the same regex clean plus a length check, and the
+model only re-runs on the handful that pass the gate.
+
+Measured: of 31,510,523 `und` rows, **99.96% never reached the model**
+(31,498,948 gated; 2,498,641 of those clean away to an empty string).
+langdetect itself failed on 11,575 rows (0.037%) and never returned an
+empty candidate list. The report also carries `und_inconsistent` - rows
+labelled `und` that re-detect cleanly from the current code, which should
+be 0; anything else means the labels on disk don't reproduce and the whole
+breakdown should be distrusted.
+
+## 8. Find ASCII/Unicode art reviews (light)
+
+Locates the reviews that motivate step 4's gate: visually elaborate,
+linguistically empty text that any detector will confidently mislabel.
+Writes their links to CSV for manual inspection.
+
+```bash
+python run_find_ascii_art.py \
+  --input ../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \
+  --output ../../steam-data/step01-output/ascii_art_reviews.csv
+```
+
+- `--min-frac` (default 0.5) - minimum share of the review's characters
+  that must be art. **A share, not a count**: a long Chinese review picks
+  up art-block characters incidentally and out-scores a short pure-art one
+  on absolute count. Real art measures 0.58-0.97 of its text, ordinary CJK
+  prose 0.04-0.07 - two well-separated populations, which is why the total
+  barely moves between 0.1 and 0.7.
+- `--min-art-chars` (default 20) - excludes incidental decoration.
+- `--limit` - keep only the top N by `art_frac`.
+
+Matched 362,132 reviews at the defaults (~90s). Note the Halfwidth/
+Fullwidth Forms block is deliberately **not** treated as art - it is
+ordinary CJK punctuation, and including it fills the results with perfectly
+normal Chinese reviews.
+
+Only 63.6% of the matches are `und`: 42,372 are labelled `zh-cn` and 41,626
+`en`. Art and prose coexist in those - enough real text for the gate to
+pass and the model to classify, while most characters are drawing. The gate
+captures *pure* art only; a third of the phenomenon sits inside the
+"determinate" languages.
+
 ## Bringing results back
 
 Steps 1 and 2 already ran locally, so only steps 3, 4, and 5's outputs need

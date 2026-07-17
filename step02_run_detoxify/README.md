@@ -135,3 +135,40 @@ python run_validity_mask.py \
 `rows_invalid_perspective`, `rows_invalid_detoxify`, `valid_pct` per
 language. To apply the mask itself in your own analysis code, call
 `validity_mask.apply_validity_mask(df)` directly.
+
+## Correlating the two models (light)
+
+How far Perspective and Detoxify agree, per language. Both scores already
+live on the same row of this step's output, so it is a read-and-correlate -
+no join against step01 needed.
+
+```bash
+python run_score_correlation.py \
+  --input ../../steam-data/step02-output \
+  --output ../../steam-data/step02-output/score_correlation_report.json
+```
+
+Only the languages this step scored can appear (pt/en - Detoxify never ran
+on the other 54 step01 detected), and the population is narrower than "all
+pt/en reviews": it is step01's agreement-mask subset, the same rows
+`run_detoxify.py` scored. The `n` per language matches
+`agreement_report.json`'s `rows_agree` exactly, which is a useful
+cross-check that the two reports describe the same population.
+
+Rows with a score outside [0, 1] are excluded via
+`validity_mask.apply_validity_mask` - a sentinel dragged into a correlation
+acts as a high-leverage outlier, not merely as noise. None occur in
+practice: zero invalid rows across all 27.4M.
+
+**Both Pearson and Spearman are reported, and the pair matters more than
+either alone.** Measured, Spearman comes out *below* Pearson (en: 0.716 vs
+0.774; pt: 0.601 vs 0.760) - the reverse of the usual expectation for two
+differently-calibrated models. Both scores pile up near zero (mean
+perspective_score 0.126 for en, 0.083 for pt) and the two models order that
+dense low-toxicity mass close to arbitrarily; Spearman weights it like
+everything else, while Pearson is carried by the toxic tail where they do
+move together. Reading Pearson alone would overstate how much the models
+agree on any single review - and pt is where they diverge most.
+
+For agreement between *humans* rather than models, see
+`annotation_agreement/`.

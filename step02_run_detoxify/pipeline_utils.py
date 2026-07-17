@@ -38,7 +38,7 @@ def list_parquet_files(directory: Path) -> list:
     """Lists every *.parquet file in `directory`, warning about any file
     that looks like an un-downloaded cloud-storage placeholder."""
     directory = Path(directory)
-    parquet_files = sorted(directory.glob("*.parquet"))
+    parquet_files = sorted(directory.rglob("*.parquet"))
     info(f"Found {len(parquet_files)} parquet file(s) in {directory}")
     for f in parquet_files:
         warn_if_not_materialized(f)
