@@ -104,37 +104,58 @@ def detect_stratification(df: pd.DataFrame) -> str:
     )
 
 
-def _resolve_missing(annotations: pd.DataFrame, assume_missing_agrees: bool):
+def _resolve_missing(annotations: pd.DataFrame, fill_missing_with_majority: bool):
     """Handles annotator cells left blank. Returns (annotations, n_missing).
 
-    `bins_en_1.xlsx` is missing four of annotator P's labels. The published
-    table can only be reproduced by assuming P agreed with the other two on
-    all four (in one of them both said 'toxic', so filling blanks with
-    'non-toxic' does not reproduce it) - which is evidence the annotations
-    existed when the table was computed and were lost from the spreadsheet
-    afterwards, not that P abstained.
+    `bins_en_1.xlsx` is missing four of annotator P's labels. Filling each
+    with the majority of the annotators who did label that review
+    reproduces the published table exactly; filling them all with
+    'non-toxic' does not (in one, both other annotators said 'toxic'). That
+    is evidence P's labels existed when the table was computed and were
+    lost from the spreadsheet afterwards, not that P abstained.
 
-    That assumption is reconstruction, not data, so it is off by default:
-    normally the incomplete rows are dropped and the count is reported, and
-    `assume_missing_agrees` opts in to reproducing the published figures.
-    Note the assumption cannot lower agreement - it can only manufacture
-    unanimity - so a table built with it on is biased upward by
-    construction.
+    Filling is reconstruction, not data, so it is off by default: normally
+    the incomplete rows are dropped and the count is reported, and
+    `fill_missing_with_majority` opts in to reproducing the published
+    figures. Filling can only ever *raise* agreement - a filled vote always
+    joins the side that is already ahead, never the one behind - so a table
+    built with it on is biased upward by construction.
+
+    A majority needs one to exist. With three annotators, a blank leaves
+    two, and two annotators only have a majority when they agree - so this
+    rule and "assume the missing annotator agreed with the others" are the
+    same rule here, and become undefined at the same point. Reviews where
+    the remaining annotators are split (or where none are left) are dropped
+    rather than guessed: taking the mode would pick whichever label sorts
+    first, inventing a vote and breaking the tie silently. Neither case
+    occurs in the current spreadsheets - all four blanks sit beside two
+    annotators who agree, and all four are kept and filled - so this only
+    guards future annotation rounds, where a fourth annotator would let a
+    majority exist without unanimity.
     """
     missing = annotations.isna().any(axis=1)
     n_missing = int(missing.sum())
     if not n_missing:
         return annotations, 0
 
-    if not assume_missing_agrees:
+    if not fill_missing_with_majority:
         return annotations[~missing], n_missing
 
     filled = annotations.copy()
+    no_majority = []
     for i in filled.index[missing]:
-        present = filled.loc[i].dropna()
-        if present.empty:
+        votes = filled.loc[i].dropna().value_counts()
+        if votes.empty or (len(votes) > 1 and votes.iloc[0] == votes.iloc[1]):
+            no_majority.append(i)
             continue
-        filled.loc[i] = filled.loc[i].fillna(present.mode()[0])
+        filled.loc[i] = filled.loc[i].fillna(votes.index[0])
+
+    if no_majority:
+        info(
+            f"  {len(no_majority)} review(s) dropped: an annotation is missing and the "
+            f"remaining annotators have no majority to fill it from"
+        )
+        filled = filled.drop(index=no_majority)
     return filled, n_missing
 
 
@@ -162,8 +183,8 @@ def _majority(annotations: pd.DataFrame) -> str:
     return TOXIC if toxic > non_toxic else NON_TOXIC
 
 
-def bin_agreement(annotations: pd.DataFrame, assume_missing_agrees: bool) -> dict:
-    annotations, n_missing = _resolve_missing(annotations, assume_missing_agrees)
+def bin_agreement(annotations: pd.DataFrame, fill_missing_with_majority: bool) -> dict:
+    annotations, n_missing = _resolve_missing(annotations, fill_missing_with_majority)
     n_reviews = len(annotations)
     result = {
         "n_reviews": n_reviews,
@@ -199,7 +220,7 @@ def bin_agreement(annotations: pd.DataFrame, assume_missing_agrees: bool) -> dic
     return result
 
 
-def agreement_table(path: Path, assume_missing_agrees: bool = False) -> dict:
+def agreement_table(path: Path, fill_missing_with_majority: bool = False) -> dict:
     """Builds one spreadsheet's half of the table (one model's bins)."""
     df = pd.read_excel(path)
     annotators = detect_annotators(df)
@@ -211,7 +232,7 @@ def agreement_table(path: Path, assume_missing_agrees: bool = False) -> dict:
     for label in sorted(df[bin_column].dropna().unique(), key=bin_lower_bound):
         rows = df[df[bin_column] == label]
         entry = {"bin": str(label), "bin_lower_bound": bin_lower_bound(label)}
-        entry.update(bin_agreement(rows[annotators], assume_missing_agrees))
+        entry.update(bin_agreement(rows[annotators], fill_missing_with_majority))
         bins.append(entry)
 
     return {
