@@ -189,22 +189,46 @@ def summarize_coverage(numerator: pd.Series, denominator: pd.Series, label: str)
     (e.g. a user's pt reviews, or their pt+en reviews) over the same
     all-language denominator. reindex(fill_value=0) so an in-scope user with
     none of these reviews still appears (as 0% coverage) instead of dropping
-    out of the distribution entirely."""
+    out of the distribution entirely.
+
+    Each threshold is reported against TWO denominators, because they answer
+    different questions and the corpus is heavily skewed toward English:
+      - pct_of_in_scope_users: share of EVERY user step06 analyzes. Shows the
+        absolute weight of this language in the corpus, but conflates "few
+        users write this language" with "users who do write it are mixed".
+      - pct_of_users_with_this_language: share of just the users who wrote at
+        least one review in this language. Isolates the purity question - of
+        the people who DO write pt, how many write almost only pt? This is the
+        fair per-language comparison; on the real corpus the two languages look
+        wildly different on the first measure (5.5% vs 61% at >=90%) but nearly
+        identical on the second (61% vs 66%).
+    """
     coverage = numerator.reindex(denominator.index, fill_value=0) / denominator
+    users_with_language = int(len(numerator))
 
     describe = coverage.describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99])
     info(f"=== Coverage distribution: fraction of an in-scope user's total reviews that are {label} ===")
     print(describe.to_string())
+    info(f"  [{label}] {users_with_language} user(s) have at least one {label} review")
 
     threshold_counts = {}
     for t in THRESHOLDS:
         n = int((coverage >= t).sum())
-        pct = 100 * n / len(coverage)
-        threshold_counts[f">={int(t * 100)}%"] = {"n_users": n, "pct_of_in_scope_users": round(pct, 2)}
-        info(f"  [{label}] >= {int(t * 100)}% coverage: {n} user(s) ({pct:.2f}% of in-scope users)")
+        pct_scope = 100 * n / len(coverage)
+        pct_lang = 100 * n / users_with_language if users_with_language else 0.0
+        threshold_counts[f">={int(t * 100)}%"] = {
+            "n_users": n,
+            "pct_of_in_scope_users": round(pct_scope, 2),
+            "pct_of_users_with_this_language": round(pct_lang, 2),
+        }
+        info(
+            f"  [{label}] >= {int(t * 100)}% coverage: {n} user(s) "
+            f"({pct_scope:.2f}% of all in-scope, {pct_lang:.2f}% of {label} users)"
+        )
 
     return {
         "users_counted": int(len(coverage)),
+        "users_with_this_language": users_with_language,
         "coverage_describe": describe.to_dict(),
         "threshold_counts": threshold_counts,
     }
