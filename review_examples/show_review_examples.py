@@ -71,18 +71,36 @@ def load_games(games_path: Path) -> pd.DataFrame:
     return pd.read_parquet(games_path, columns=["game_id", "title", "popular_tags"])
 
 
+def _resolve_lang_source(base_dir: Path, lang: str) -> Path:
+    """step02/step04's output has been observed in two different layouts
+    across this project's lifetime: subfolders (base_dir/review_lang=<lang>/
+    *.parquet) and flat (every language together in base_dir directly, with
+    review_lang as a column). Rather than hardcode one, check which shape
+    is actually present and use that - avoids silently breaking again if
+    the layout changes."""
+    subfolder = base_dir / f"review_lang={lang}"
+    return subfolder if subfolder.is_dir() else base_dir
+
+
 def load_scored_reviews(step02_dir: Path, lang: str) -> pd.DataFrame:
-    """Base table: every step02-scored review for one language, read from
-    step02's flat output (every language scored together in the same
-    files - see module docstring) and filtered to
-    review_lang == perspective_declared_language == lang."""
-    files = list_parquet_files(step02_dir)
-    columns = [
-        "review_url", "review_text", "game_id",
-        "perspective_score", "detoxify_score", "review_lang", "perspective_declared_language",
-    ]
+    """Base table: every step02-scored review for one language. Handles
+    both the subfolder layout (read the review_lang=<lang>/ subfolder
+    directly - review_lang isn't a real column there) and the flat layout
+    (every language together, filtered by the review_lang column) - see
+    _resolve_lang_source."""
+    source = _resolve_lang_source(step02_dir, lang)
+    is_subfolder = source != step02_dir
+
+    files = list_parquet_files(source)
+    columns = ["review_url", "review_text", "game_id", "perspective_score", "detoxify_score"]
+    if not is_subfolder:
+        columns += ["review_lang"]
+    columns += ["perspective_declared_language"]
+
     frames = [pd.read_parquet(f, columns=columns) for f in files]
     df = pd.concat(frames, ignore_index=True)
+    if is_subfolder:
+        df["review_lang"] = lang
 
     rows_before_mask = len(df)
     df = df[
@@ -157,21 +175,26 @@ def attach_sentiment(df: pd.DataFrame, step04_dir: Path, lang: str) -> pd.DataFr
     output exists. No-op (adds an empty column) if not - per this
     function's contract, this data may not be available yet.
 
-    step04's output is flat (every language scored together, same as
-    step02 - see sentiment_scoring.py's module docstring), so review_url
-    alone is enough to join correctly without needing a language filter -
-    it's still applied here for consistency with load_scored_reviews and
-    as a defensive check against any stray cross-language review_url
-    collision."""
+    Handles both the subfolder and flat layouts - see _resolve_lang_source."""
     if not step04_dir or not step04_dir.exists():
         info(f"No step04 output found for [{lang}] - sentiment_score will be empty")
         df["sentiment_score"] = pd.NA
         return df
 
-    files = list_parquet_files(step04_dir)
-    frames = [pd.read_parquet(f, columns=["review_url", "review_lang", "sentiment_score"]) for f in files]
+    source = _resolve_lang_source(step04_dir, lang)
+    is_subfolder = source != step04_dir
+
+    files = list_parquet_files(source)
+    if not files:
+        info(f"No step04 files found for [{lang}] at {source} - sentiment_score will be empty")
+        df["sentiment_score"] = pd.NA
+        return df
+
+    columns = ["review_url", "sentiment_score"] + ([] if is_subfolder else ["review_lang"])
+    frames = [pd.read_parquet(f, columns=columns) for f in files]
     sentiment = pd.concat(frames, ignore_index=True)
-    sentiment = sentiment[sentiment["review_lang"] == lang].drop(columns=["review_lang"])
+    if not is_subfolder:
+        sentiment = sentiment[sentiment["review_lang"] == lang].drop(columns=["review_lang"])
     return df.merge(sentiment, on="review_url", how="left")
 
 
