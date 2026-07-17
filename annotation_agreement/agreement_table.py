@@ -18,15 +18,36 @@ scored in [0.7, 0.8), how much did the humans agree with each other, and
 what did they conclude?" - i.e. whether the model's confidence band
 corresponds to anything humans recognise as toxic.
 
-THE STATISTIC IS RANDOLPH'S KAPPA, NOT FLEISS'.
+BOTH KAPPAS ARE REPORTED, AND NEITHER IS CALLED JUST "KAPPA".
 The original called `fleiss_kappa(table, method='rand')` from a function
-named `calcular_fleiss_kappa`; `method='rand'` selects Randolph's
-free-marginal kappa, not Fleiss' fixed-marginal one. They are different
-statistics (Randolph assumes chance agreement is 1/k for k categories,
-rather than deriving it from the observed marginals) and Randolph
-generally reports higher values. The name is corrected here; the
-statistic is deliberately kept, so the numbers stay comparable to what
-was already published.
+named `calcular_fleiss_kappa`. `method='rand'` selects Randolph's
+free-marginal kappa, not Fleiss' fixed-marginal one - so despite every
+name around it, the published table has always been Randolph. The two are
+different statistics and differ by up to 0.36 on this data (en's [0.9,
+1.0) bin: Randolph 0.80, Fleiss 0.44), which a single unnamed "Kappa"
+column cannot reveal. Hence `kappa_randolph` and `kappa_fleiss`, never
+`kappa`.
+
+Randolph is the appropriate primary figure here, and the reason is the
+design rather than the number it produces. The two differ only in what
+they treat as chance agreement: Fleiss derives it from the observed
+marginals, Randolph fixes it at 1/k for k categories. Fleiss' assumption
+is that a skewed marginal reveals a rater's prior leaning, which should
+be discounted - true when raters work to a quota. These annotators had
+none; they judged each review on its own, so the marginal is an outcome,
+not a constraint. Worse, each bin's prevalence is imposed by this study's
+own stratification (a bin of >= 0.9 model scores really is almost all
+toxic), so Fleiss' correction penalises the sampling design and reads it
+as annotator bias: it scores en's [0.9, 1.0) bin at 0.44 despite 17 of 20
+reviews being unanimous, the highest agreement in the table. Fleiss is
+kept alongside for comparability - it is always <= Randolph (Warrens
+2010), so reporting only Randolph would be reporting only the upper
+bound.
+
+References: Fleiss (1971), Psychological Bulletin 76(5); Randolph (2005),
+"Free-Marginal Multirater Kappa: An Alternative to Fleiss' Fixed-Marginal
+Multirater Kappa"; Warrens (2010), Advances in Data Analysis and
+Classification 4(4).
 
 WITH 20 ITEMS AND 3 ANNOTATORS, KAPPA IS QUANTISED.
 For 2 categories, Randolph's kappa reduces to (u - 5) / 15, where u is the
@@ -198,21 +219,28 @@ def bin_agreement(annotations: pd.DataFrame, fill_missing_with_majority: bool) -
     # A single-category bin makes statsmodels evaluate 0/0 and warn on its
     # way to returning NaN. That case is expected and handled just below,
     # so the warning is suppressed here rather than left to imply something
-    # went wrong - narrowly, around this one call.
+    # went wrong - narrowly, around these calls.
     with np.errstate(invalid="ignore"):
-        kappa = fleiss_kappa(table, method="rand")
+        randolph = fleiss_kappa(table, method="rand")
+        fleiss = fleiss_kappa(table, method="fleiss")
 
     # A bin where every annotator chose the same single category has no
-    # variance, so kappa is 0/0. The original silently substituted 1.0; it
-    # is kept (the published 1.0000 cells are all this case) but flagged,
-    # because "undefined" and "perfect agreement" are different claims and
-    # the table cannot distinguish them on its own.
-    kappa_undefined = bool(np.isnan(kappa)) and table.shape[1] == 1
+    # variance, so kappa is 0/0 under either definition. The original
+    # silently substituted 1.0; it is kept (the published 1.0000 cells are
+    # all this case) but flagged, because "undefined" and "perfect
+    # agreement" are different claims and a bare number cannot distinguish
+    # them.
+    kappa_undefined = bool(np.isnan(randolph)) and table.shape[1] == 1
     if kappa_undefined:
-        kappa = 1.0
+        randolph = fleiss = 1.0
 
     result.update({
-        "kappa": round(float(kappa), 4),
+        # Both are reported, and neither is called just "kappa". A bare
+        # "Kappa" is what let the published table be labelled Fleiss while
+        # holding Randolph for years: the two differ by up to 0.36 here, and
+        # nothing in a single unnamed column reveals which one it is.
+        "kappa_randolph": round(float(randolph), 4),
+        "kappa_fleiss": round(float(fleiss), 4),
         "kappa_undefined_forced_to_one": kappa_undefined,
         "n_unanimous_reviews": int((annotations.nunique(axis=1) == 1).sum()),
         "majority": _majority(annotations),

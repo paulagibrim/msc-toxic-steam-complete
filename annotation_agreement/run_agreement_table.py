@@ -84,7 +84,18 @@ def main():
 
     save_summary(
         {
-            "kappa_statistic": "Randolph's free-marginal kappa (statsmodels fleiss_kappa method='rand')",
+            "kappa_randolph": (
+                "Randolph's free-marginal kappa (statsmodels fleiss_kappa method='rand'). "
+                "The primary figure, and what the previously published table reports: the "
+                "annotators worked to no quota, and each bin's prevalence is imposed by this "
+                "study's stratification, so a marginal-derived chance correction penalises the "
+                "sampling design rather than the annotators. Randolph (2005)."
+            ),
+            "kappa_fleiss": (
+                "Fleiss' fixed-marginal kappa (statsmodels fleiss_kappa method='fleiss'). "
+                "Reported alongside for comparability; always <= Randolph (Warrens 2010), so "
+                "Randolph alone would be the upper bound only. Fleiss (1971)."
+            ),
             "majority_rule": "per-review 2-of-3 vote, then majority of those per-review verdicts",
             "missing_annotations": (
                 "filled with the majority vote of the annotators who did label the review"

@@ -69,16 +69,48 @@ Per language, per model, per bin: `kappa`, `majority`, `n_reviews`,
 recorded at the top of the JSON itself, so the file explains itself without
 this README.
 
-### The statistic is Randolph's kappa, not Fleiss'
+### Two kappas, both named — `kappa_randolph` and `kappa_fleiss`
 
 The original notebook called `fleiss_kappa(table, method='rand')` from a
 function named `calcular_fleiss_kappa`. `method='rand'` selects **Randolph's
-free-marginal kappa**, not Fleiss' fixed-marginal one - different
-statistics (Randolph fixes chance agreement at 1/k for k categories instead
-of deriving it from the observed marginals), and Randolph generally reports
-higher values. The statistic is deliberately kept so the numbers stay
-comparable to what was already published; only the name is corrected. **Cite
-it as Randolph's.**
+free-marginal kappa**, not Fleiss' fixed-marginal one — so despite the
+function's name, and despite the published table's column reading only
+"Kappa", **that table has always been Randolph. Cite it as Randolph's.**
+
+The two are not interchangeable. On this data they differ by up to 0.36:
+
+| en, Perspective | Randolph | Fleiss |
+|---|---:|---:|
+| `[0.2, 0.3)` | 0.9333 | 0.9018 |
+| `[0.3, 0.4)` | 0.9333 | 0.7321 |
+| `[0.8, 0.9)` | 0.7333 | 0.6072 |
+| `[0.9, 1.0)` | **0.8000** | **0.4444** |
+
+Both are therefore written to the JSON under their own names, and neither
+is called `kappa`. An unnamed column is precisely what let the mismatch
+survive.
+
+**Why Randolph is the primary figure here** — the design, not the number it
+gives. The two differ only in what counts as chance agreement: Fleiss
+derives it from the observed marginals, Randolph fixes it at 1/k. Fleiss'
+assumption is that a skewed marginal exposes a rater's prior leaning, which
+ought to be discounted — sound when raters work to a quota. These annotators
+had none: they judged each review on its own, so the marginal is an outcome
+of their judgement, not a constraint on it. And each bin's prevalence is
+imposed by *this study's own stratification* — a bin of `>= 0.9` model
+scores really is almost all toxic — so Fleiss' correction discounts the
+sampling design as if it were annotator bias. It scores en's `[0.9, 1.0)`
+bin at 0.44 despite 17 of its 20 reviews being unanimous, the highest
+agreement anywhere in the table.
+
+**Why Fleiss is reported anyway** — it is always `<=` Randolph (Warrens
+2010), so publishing Randolph alone publishes the upper bound and nothing
+else. Carrying both makes the choice auditable instead of implicit.
+
+References: Fleiss (1971), *Psychological Bulletin* 76(5); Randolph (2005),
+*Free-Marginal Multirater Kappa: An Alternative to Fleiss' Fixed-Marginal
+Multirater Kappa*; Warrens (2010), *Advances in Data Analysis and
+Classification* 4(4).
 
 ### Kappa is quantised, so small gaps mean nothing
 
