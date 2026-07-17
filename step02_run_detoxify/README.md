@@ -170,5 +170,35 @@ everything else, while Pearson is carried by the toxic tail where they do
 move together. Reading Pearson alone would overstate how much the models
 agree on any single review - and pt is where they diverge most.
 
+### Agreement on the *label*, not the score
+
+The report also counts, per language, how the two models divide up the
+reviews either of them calls toxic, at the project's usual thresholds
+(`perspective_score >= 0.7` OR `detoxify_score >= 0.9`). This is a
+different question from the correlations, and a far less reassuring
+answer:
+
+| | en | pt |
+|---|---:|---:|
+| toxic by either model | 480,729 | 33,685 |
+| both agree | 179,519 | 7,695 |
+| perspective only | 69,424 | 3,965 |
+| detoxify only | 231,786 | 22,025 |
+| **both, as % of either** | **37.3%** | **22.8%** |
+
+A correlation describes the whole score range at once, and both models
+spend most of it agreeing that ordinary reviews are not toxic - which is
+easy, and which dominates the statistic. The label is decided at a single
+point, where they are free to disagree completely: **only 37% of en's toxic
+set and 23% of pt's has both models agreeing.** The rest rests on one
+model's say-so. Detoxify is the more aggressive of the two despite its
+higher threshold, flagging 3.3x more than Perspective alone in en and 5.6x
+in pt.
+
+pt is worse on both measures (Spearman 0.601 vs 0.716, agreement 22.8% vs
+37.3%), which is consistent: the models order pt reviews less alike, so
+they cross the threshold on different ones. Any pt result derived from a
+toxicity label should say which model produced it.
+
 For agreement between *humans* rather than models, see
 `annotation_agreement/`.
