@@ -28,10 +28,10 @@ LEFT-JOINED WITH:
 
 Usage:
     python build_phase1_feature_table.py \\
-        --labels ../../steam-data/step06-output/toxic_user_labels.parquet \\
-        --profile-metadata ../../steam-data/step06-output/user_profile_metadata.parquet \\
-        --embeddings ../../steam-data/step06-output/user_text_embeddings.parquet \\
-        --output ../../steam-data/step06-output/phase1_feature_table.parquet
+        --labels ../../../steam-data/step06-output/toxic_user_labels.parquet \\
+        --profile-metadata ../../../steam-data/step06-output/user_profile_metadata.parquet \\
+        --embeddings ../../../steam-data/step06-output/user_text_embeddings.parquet \\
+        --output ../../../steam-data/step06-output/phase1_feature_table.parquet
 """
 import argparse
 from pathlib import Path

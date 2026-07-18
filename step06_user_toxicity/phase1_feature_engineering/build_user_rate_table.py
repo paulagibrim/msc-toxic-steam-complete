@@ -43,9 +43,9 @@ Output: one parquet file, one row per user_url in step02's scope:
 
 Usage:
     python build_user_rate_table.py \\
-        --step02-dir ../../steam-data/step02-output \\
-        --reviews-by-lang ../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \\
-        --output ../../steam-data/step06-output/user_rate_table.parquet
+        --step02-dir ../../../steam-data/step02-output \\
+        --reviews-by-lang ../../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \\
+        --output ../../../steam-data/step06-output/user_rate_table.parquet
 """
 import argparse
 from pathlib import Path

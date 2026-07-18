@@ -41,9 +41,9 @@ Output: one parquet row per user_url that both (a) appears in
 
 Usage:
     python build_user_profile_metadata.py \\
-        --labels ../../steam-data/step06-output/toxic_user_labels.parquet \\
-        --users ../../steam-data/step01-output/users/all_users.parquet \\
-        --output ../../steam-data/step06-output/user_profile_metadata.parquet
+        --labels ../../../steam-data/step06-output/toxic_user_labels.parquet \\
+        --users ../../../steam-data/step01-output/users/all_users.parquet \\
+        --output ../../../steam-data/step06-output/user_profile_metadata.parquet
 """
 import argparse
 from pathlib import Path

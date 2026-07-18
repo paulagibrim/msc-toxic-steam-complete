@@ -63,9 +63,9 @@ empty text, e.g. a review that was ONLY a boilerplate phrase or a URL).
 
 Usage:
     python build_user_text_embeddings.py \\
-        --step02-dir ../../steam-data/step02-output \\
-        --profile-metadata ../../steam-data/step06-output/user_profile_metadata.parquet \\
-        --output ../../steam-data/step06-output/user_text_embeddings.parquet \\
+        --step02-dir ../../../steam-data/step02-output \\
+        --profile-metadata ../../../steam-data/step06-output/user_profile_metadata.parquet \\
+        --output ../../../steam-data/step06-output/user_text_embeddings.parquet \\
         --batch-size 256
 """
 import argparse

@@ -31,8 +31,8 @@ TWO labeling approaches are compared, at several settings each:
 
 Usage:
     python run_trate_diagnostic.py \\
-        --table ../../steam-data/step06-output/user_rate_table.parquet \\
-        --output ../../steam-data/step06-output/trate_diagnostic_report.json
+        --table ../../../steam-data/step06-output/user_rate_table.parquet \\
+        --output ../../../steam-data/step06-output/trate_diagnostic_report.json
 """
 import argparse
 from pathlib import Path

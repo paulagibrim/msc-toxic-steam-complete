@@ -36,8 +36,8 @@ a user can be eligible+toxic in en while not eligible in pt at all:
 
 Usage:
     python build_toxic_user_labels.py \\
-        --table ../../steam-data/step06-output/user_rate_table.parquet \\
-        --output ../../steam-data/step06-output/toxic_user_labels.parquet \\
+        --table ../../../steam-data/step06-output/user_rate_table.parquet \\
+        --output ../../../steam-data/step06-output/toxic_user_labels.parquet \\
         --t-coverage 0.90 --alpha 0.01
 """
 import argparse
