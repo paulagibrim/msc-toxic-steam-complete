@@ -40,10 +40,10 @@ probability), enough to compute an AUC-PR / precision-recall curve for the
 population - and a summary JSON with the resulting AUC-PR.
 
 Usage:
-    python phase2_nested_cv.py \\
-        --feature-table ../../../steam-data/step06-output/phase1_feature_table.parquet \\
+    python 01_phase2_nested_cv.py \\
+        --feature-table ../../../steam-data/step06-output/phase1_feature_engineering/pipeline/phase1_feature_table.parquet \\
         --population pt \\
-        --output ../../../steam-data/step06-output/phase2_pt_oof_predictions.parquet \\
+        --output ../../../steam-data/step06-output/phase2_classical_ml/phase2_pt_oof_predictions.parquet \\
         --n-jobs -1
 """
 import argparse

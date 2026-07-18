@@ -45,11 +45,11 @@ value_counts() and the per-file counts are summed. No cross-worker
 coordination, no shuffle, bounded memory.
 
 Usage:
-    python run_language_coverage_diagnostic.py \\
-        --step02-dir ../../../steam-data/step02-output \\
-        --deduped ../../../steam-data/step01-output/reviews_deduped.parquet \\
-        --reviews-by-lang ../../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \\
-        --output ../../../steam-data/step06-output/language_coverage_report.json
+    python 01_run_language_coverage_diagnostic.py \\
+        --step02-dir ../../../../steam-data/step02-output \\
+        --deduped ../../../../steam-data/step01-output/reviews_deduped.parquet \\
+        --reviews-by-lang ../../../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \\
+        --output ../../../../steam-data/step06-output/phase1_feature_engineering/diagnostics/language_coverage_report.json
 """
 import argparse
 from pathlib import Path

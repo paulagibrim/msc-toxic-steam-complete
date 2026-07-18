@@ -27,11 +27,11 @@ LEFT-JOINED WITH:
     something to paper over or impute here.
 
 Usage:
-    python build_phase1_feature_table.py \\
-        --labels ../../../steam-data/step06-output/toxic_user_labels.parquet \\
-        --profile-metadata ../../../steam-data/step06-output/user_profile_metadata.parquet \\
-        --embeddings ../../../steam-data/step06-output/user_text_embeddings.parquet \\
-        --output ../../../steam-data/step06-output/phase1_feature_table.parquet
+    python 05_build_phase1_feature_table.py \\
+        --labels ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/toxic_user_labels.parquet \\
+        --profile-metadata ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/user_profile_metadata.parquet \\
+        --embeddings ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/user_text_embeddings.parquet \\
+        --output ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/phase1_feature_table.parquet
 """
 import argparse
 from pathlib import Path

@@ -30,9 +30,9 @@ TWO labeling approaches are compared, at several settings each:
     account for running one test per user).
 
 Usage:
-    python run_trate_diagnostic.py \\
-        --table ../../../steam-data/step06-output/user_rate_table.parquet \\
-        --output ../../../steam-data/step06-output/trate_diagnostic_report.json
+    python 02_run_trate_diagnostic.py \\
+        --table ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/user_rate_table.parquet \\
+        --output ../../../../steam-data/step06-output/phase1_feature_engineering/diagnostics/trate_diagnostic_report.json
 """
 import argparse
 from pathlib import Path

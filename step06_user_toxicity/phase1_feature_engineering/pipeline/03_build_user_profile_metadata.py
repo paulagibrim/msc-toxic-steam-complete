@@ -40,10 +40,10 @@ Output: one parquet row per user_url that both (a) appears in
     arts, groups, friends_count, profile_description
 
 Usage:
-    python build_user_profile_metadata.py \\
-        --labels ../../../steam-data/step06-output/toxic_user_labels.parquet \\
-        --users ../../../steam-data/step01-output/users/all_users.parquet \\
-        --output ../../../steam-data/step06-output/user_profile_metadata.parquet
+    python 03_build_user_profile_metadata.py \\
+        --labels ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/toxic_user_labels.parquet \\
+        --users ../../../../steam-data/step01-output/users/all_users.parquet \\
+        --output ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/user_profile_metadata.parquet
 """
 import argparse
 from pathlib import Path

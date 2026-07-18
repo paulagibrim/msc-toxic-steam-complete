@@ -42,10 +42,10 @@ Output: one parquet file, one row per user_url in step02's scope:
     user_url, n_total, n_pt, n_pt_toxic, n_en, n_en_toxic
 
 Usage:
-    python build_user_rate_table.py \\
-        --step02-dir ../../../steam-data/step02-output \\
-        --reviews-by-lang ../../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \\
-        --output ../../../steam-data/step06-output/user_rate_table.parquet
+    python 01_build_user_rate_table.py \\
+        --step02-dir ../../../../steam-data/step02-output \\
+        --reviews-by-lang ../../../../steam-data/step01-output/reviews_by_lang/reviews_cleaned.parquet \\
+        --output ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/user_rate_table.parquet
 """
 import argparse
 from pathlib import Path

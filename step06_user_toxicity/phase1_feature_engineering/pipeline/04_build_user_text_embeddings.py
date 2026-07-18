@@ -62,10 +62,10 @@ be less than n_<pop> in user_rate_table.parquet if some reviews cleaned to
 empty text, e.g. a review that was ONLY a boilerplate phrase or a URL).
 
 Usage:
-    python build_user_text_embeddings.py \\
-        --step02-dir ../../../steam-data/step02-output \\
-        --profile-metadata ../../../steam-data/step06-output/user_profile_metadata.parquet \\
-        --output ../../../steam-data/step06-output/user_text_embeddings.parquet \\
+    python 04_build_user_text_embeddings.py \\
+        --step02-dir ../../../../steam-data/step02-output \\
+        --profile-metadata ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/user_profile_metadata.parquet \\
+        --output ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/user_text_embeddings.parquet \\
         --batch-size 256
 """
 import argparse

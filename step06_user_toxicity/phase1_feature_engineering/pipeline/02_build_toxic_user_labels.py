@@ -35,9 +35,9 @@ a user can be eligible+toxic in en while not eligible in pt at all:
     eligible_union, p_value_union, is_toxic_union
 
 Usage:
-    python build_toxic_user_labels.py \\
-        --table ../../../steam-data/step06-output/user_rate_table.parquet \\
-        --output ../../../steam-data/step06-output/toxic_user_labels.parquet \\
+    python 02_build_toxic_user_labels.py \\
+        --table ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/user_rate_table.parquet \\
+        --output ../../../../steam-data/step06-output/phase1_feature_engineering/pipeline/toxic_user_labels.parquet \\
         --t-coverage 0.90 --alpha 0.01
 """
 import argparse
