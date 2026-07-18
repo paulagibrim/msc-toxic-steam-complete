@@ -57,6 +57,7 @@ from sklearn.linear_model import LogisticRegressionCV
 from sklearn.metrics import average_precision_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
 
 from pipeline_utils import info, save_summary
 
@@ -260,9 +261,12 @@ def main():
     # a full copy into every one of n_jobs workers - critical for en/union
     # where X_emb alone is ~2.2M x 384 floats.
     info(f"[{args.population}] Running {len(remaining_positions)} outer LOO fold(s) across n_jobs={args.n_jobs}...")
+    bar = tqdm(total=n_folds_to_run, initial=n_folds_done, desc=f"[{args.population}]", unit="fold")
     for batch_start in range(0, len(remaining_positions), CHECKPOINT_EVERY):
         batch = remaining_positions[batch_start : batch_start + CHECKPOINT_EVERY]
-        results = Parallel(n_jobs=args.n_jobs, verbose=5, max_nbytes="10M")(
+        # verbose=0: joblib's own per-task logging would clutter the tqdm
+        # bar - tqdm is the single source of progress now.
+        results = Parallel(n_jobs=args.n_jobs, verbose=0, max_nbytes="10M")(
             delayed(run_outer_fold)(i, all_pos_idx, train_neg_idx, test_neg_idx, X_profile, X_emb, y)
             for i in batch
         )
@@ -271,7 +275,9 @@ def main():
             neg_score_sum += neg_scores
         n_folds_done += len(batch)
         save_checkpoint(checkpoint_dir, pos_predictions, neg_score_sum, n_folds_done)
-        info(f"[checkpoint] Saved after {n_folds_done}/{n_folds_to_run} outer fold(s)")
+        bar.update(len(batch))
+        bar.set_postfix(checkpoint=f"{n_folds_done}/{n_folds_to_run}")
+    bar.close()
 
     neg_predictions_avg = neg_score_sum / n_folds_done
 
