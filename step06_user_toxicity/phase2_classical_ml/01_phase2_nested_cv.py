@@ -52,6 +52,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
+from joblib.externals.loky import get_reusable_executor
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.metrics import average_precision_score
@@ -71,7 +72,7 @@ TEST_NEGATIVE_FRACTION = 0.20
 INNER_CV_FOLDS = 3
 C_CANDIDATES = [0.001, 0.01, 0.1, 1.0, 10.0]
 RANDOM_STATE = 42
-CHECKPOINT_EVERY = 50  # outer folds, per batch
+CHECKPOINT_EVERY = 20  # outer folds, per batch - also how often worker processes are recycled (see main())
 
 
 def parse_args():
@@ -140,14 +141,25 @@ def preprocess_fold(train_profile_raw: np.ndarray, train_emb_raw: np.ndarray,
     train_profile_scaled = profile_scaler.fit_transform(train_profile)
     test_profile_scaled = profile_scaler.transform(test_profile)
 
-    emb_scaler = StandardScaler()
-    train_emb_scaled = emb_scaler.fit_transform(train_emb_raw)
-    test_emb_scaled = emb_scaler.transform(test_emb_raw)
+    # NOT StandardScaler here, deliberately: it promotes float32 input to
+    # float64 internally (its incremental mean/var computation broadcasts
+    # X - T where T is accumulated in float64, and numpy upcasts the WHOLE
+    # result to match) - for en/union's ~1.75M x 384 training block this
+    # briefly allocates an extra ~5GB single array, which OOM-crashed a
+    # 32GB Windows machine here. Manual mean/std keeps every array float32
+    # throughout (mean/std are tiny per-column vectors; the elementwise
+    # subtract/divide only promotes dtype if one of the operands already
+    # is float64, which none are here).
+    train_emb_mean = train_emb_raw.mean(axis=0).astype(np.float32)
+    train_emb_std = train_emb_raw.std(axis=0).astype(np.float32)
+    train_emb_std[train_emb_std == 0] = 1.0
+    train_emb_scaled = (train_emb_raw - train_emb_mean) / train_emb_std
+    test_emb_scaled = (test_emb_raw - train_emb_mean) / train_emb_std
 
     n_components = min(PCA_COMPONENTS, train_emb_scaled.shape[0] - 1, train_emb_scaled.shape[1])
     pca = PCA(n_components=n_components, random_state=RANDOM_STATE)
-    train_emb_pca = pca.fit_transform(train_emb_scaled)
-    test_emb_pca = pca.transform(test_emb_scaled)
+    train_emb_pca = pca.fit_transform(train_emb_scaled).astype("float32")
+    test_emb_pca = pca.transform(test_emb_scaled).astype("float32")
 
     X_train_final = np.hstack([train_profile_scaled, train_emb_pca]).astype("float32")
     X_test_final = np.hstack([test_profile_scaled, test_emb_pca]).astype("float32")
@@ -277,6 +289,17 @@ def main():
         save_checkpoint(checkpoint_dir, pos_predictions, neg_score_sum, n_folds_done)
         bar.update(len(batch))
         bar.set_postfix(checkpoint=f"{n_folds_done}/{n_folds_to_run}")
+
+        # joblib's loky backend reuses the same worker processes across
+        # every Parallel(...) call in this process by default (avoids
+        # respawn overhead) - but numpy/BLAS (used inside every fold's fit)
+        # retain freed memory pages for reuse rather than returning them to
+        # the OS, so RSS creeps up the longer a worker stays alive across
+        # many folds. Killing the executor after each batch forces fresh
+        # worker processes next batch, bounding how much any one process
+        # can accumulate to CHECKPOINT_EVERY folds' worth (was observed to
+        # reach 60GB+ over a full run without this).
+        get_reusable_executor().shutdown(wait=True, kill_workers=True)
     bar.close()
 
     neg_predictions_avg = neg_score_sum / n_folds_done

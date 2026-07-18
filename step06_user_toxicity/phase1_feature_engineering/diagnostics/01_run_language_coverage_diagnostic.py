@@ -55,6 +55,7 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+from tqdm import tqdm
 
 from pipeline_utils import info, save_summary
 
@@ -98,10 +99,10 @@ def load_users_in_scope(step02_dir: Path) -> set:
         )
 
     users = set()
-    for i, f in enumerate(files, start=1):
+    bar = tqdm(files, desc="[scope]", unit="file")
+    for f in bar:
         users.update(pd.read_parquet(f, columns=["user_url"])["user_url"].dropna().unique())
-        if i % 20 == 0 or i == len(files):
-            info(f"[scope] [{i}/{len(files)}] {len(users)} unique user(s) so far")
+        bar.set_postfix(users=len(users))
     return users
 
 
@@ -127,13 +128,11 @@ def count_per_user(directory: Path, label: str, users_in_scope: set) -> pd.Serie
         raise FileNotFoundError(f"No .parquet files found under {directory} (searched recursively).")
 
     partial_counts = []
-    for i, f in enumerate(files, start=1):
+    bar = tqdm(files, desc=f"[{label}]", unit="file")
+    for f in bar:
         df = pd.read_parquet(f, columns=["user_url"])
         df = df[df["user_url"].isin(users_in_scope)]
         partial_counts.append(df["user_url"].value_counts())
-
-        if i % 20 == 0 or i == len(files):
-            info(f"[{label}] [{i}/{len(files)}] file(s) read")
 
     info(f"[{label}] Summing per-file counts...")
     totals = pd.concat(partial_counts).groupby(level=0).sum()
@@ -160,15 +159,13 @@ def count_per_user_by_language(directory: Path, users_in_scope: set, languages: 
 
     partials = {lang: [] for lang in languages}
 
-    for i, f in enumerate(files, start=1):
+    bar = tqdm(files, desc="[by-language]", unit="file")
+    for f in bar:
         df = pd.read_parquet(f, columns=["user_url", "review_lang"])
         df = df[df["user_url"].isin(users_in_scope)]
 
         for lang in languages:
             partials[lang].append(df.loc[df["review_lang"] == lang, "user_url"].value_counts())
-
-        if i % 20 == 0 or i == len(files):
-            info(f"[by-language] [{i}/{len(files)}] file(s) read")
 
     info("[by-language] Summing per-file counts...")
     counts = {}
