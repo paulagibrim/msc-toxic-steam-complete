@@ -107,6 +107,38 @@ def parse_args():
     return parser.parse_args()
 
 
+def _save_checkpoint(checkpoint_dir: Path, sum_partials: dict, count_partials: dict, emb_cols: list) -> None:
+    """Save intermediate aggregation state to disk so a resumed run can
+    pick up where it left off without re-processing files."""
+    for pop in POPULATIONS:
+        if sum_partials[pop]:
+            partial_sum = pd.concat(sum_partials[pop]).groupby(level=0).sum()
+            partial_count = pd.concat(count_partials[pop]).groupby(level=0).sum()
+            checkpoint_file = checkpoint_dir / f"checkpoint_{pop}.parquet"
+            partial_sum.to_parquet(checkpoint_file)
+            (checkpoint_dir / f"checkpoint_{pop}_count.npy").unlink(missing_ok=True)
+            np.save(checkpoint_dir / f"checkpoint_{pop}_count.npy", partial_count.to_numpy())
+
+
+def _load_checkpoint(checkpoint_dir: Path, emb_cols: list) -> tuple:
+    """Load checkpoint if it exists, returning (sum_partials, count_partials)
+    ready to continue accumulation. Returns (empty, empty) if no checkpoint."""
+    sum_partials = {pop: [] for pop in POPULATIONS}
+    count_partials = {pop: [] for pop in POPULATIONS}
+
+    for pop in POPULATIONS:
+        checkpoint_file = checkpoint_dir / f"checkpoint_{pop}.parquet"
+        count_file = checkpoint_dir / f"checkpoint_{pop}_count.npy"
+        if checkpoint_file.exists() and count_file.exists():
+            partial_sum = pd.read_parquet(checkpoint_file)
+            partial_count = pd.Series(np.load(count_file), index=partial_sum.index)
+            sum_partials[pop] = [partial_sum]
+            count_partials[pop] = [partial_count]
+            info(f"[checkpoint] Loaded {pop} checkpoint: {len(partial_sum):,} user(s)")
+
+    return sum_partials, count_partials
+
+
 def light_clean(text: object) -> str:
     """Strips only boilerplate phrases and URLs - case, accents, and
     punctuation are preserved (see module docstring for why)."""
@@ -132,34 +164,60 @@ def load_matched_users(profile_metadata_path: Path) -> set:
     return set(users)
 
 
-def embed_and_accumulate(step02_dir: Path, matched_users: set, model, batch_size: int) -> dict:
+def embed_and_accumulate(step02_dir: Path, matched_users: set, model, batch_size: int, checkpoint_dir: Path = None) -> dict:
     """Single sweep over step02's files: for each file, load+clean+filter
     its rows for `matched_users`, encode the surviving text once, then
     reduce to a per-user partial sum + count per population (pt/en/union).
-    Partials are collected per population and combined once at the end."""
+    Partials are collected per population and combined once at the end.
+
+    If checkpoint_dir is provided, periodically saves intermediate results
+    so the run can resume from the last checkpoint if interrupted. Files
+    already processed (tracked via .processed markers under checkpoint_dir)
+    are skipped on resume."""
     files = sorted(step02_dir.rglob("*.parquet"))
     info(f"[embed] Encoding across {len(files)} file(s)...")
     if not files:
         raise FileNotFoundError(f"No .parquet files found under {step02_dir} (searched recursively).")
 
-    sum_partials = {pop: [] for pop in POPULATIONS}
-    count_partials = {pop: [] for pop in POPULATIONS}
+    if checkpoint_dir:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        processed_marker_dir = checkpoint_dir / "processed"
+        processed_marker_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        processed_marker_dir = None
+
+    already_processed = set()
+    if processed_marker_dir:
+        already_processed = {f.stem for f in processed_marker_dir.glob("*.done")}
+        if already_processed:
+            info(f"[checkpoint] Resuming: {len(already_processed):,} file(s) already processed")
+            files = [f for f in files if f.stem not in already_processed]
+            info(f"[checkpoint] {len(files):,} file(s) remaining to process")
+
     emb_cols = [f"e{i}" for i in range(EMBEDDING_DIM)]
+
+    # Try to load checkpoint if resuming
+    sum_partials, count_partials = _load_checkpoint(checkpoint_dir, emb_cols) if checkpoint_dir else ({pop: [] for pop in POPULATIONS}, {pop: [] for pop in POPULATIONS})
 
     n_reviews_encoded = 0
     users_seen = set()
+    files_processed = 0
+    CHECKPOINT_EVERY = 10  # Save partial results every N files
+
     bar = tqdm(files, desc="[embed]", unit="file")
     for f in bar:
         df = pd.read_parquet(f, columns=["user_url", "review_lang", "perspective_declared_language", "review_text"])
         df = df[df["user_url"].isin(matched_users)]
         df = df[df["review_lang"] == df["perspective_declared_language"]]
         if df.empty:
+            (processed_marker_dir / f"{f.stem}.done").touch() if processed_marker_dir else None
             bar.set_postfix(reviews=n_reviews_encoded, users=len(users_seen))
             continue
 
         df["review_text_clean"] = df["review_text"].apply(light_clean)
         df = df[df["review_text_clean"].str.len() > 0]
         if df.empty:
+            (processed_marker_dir / f"{f.stem}.done").touch() if processed_marker_dir else None
             bar.set_postfix(reviews=n_reviews_encoded, users=len(users_seen))
             continue
 
@@ -180,24 +238,61 @@ def embed_and_accumulate(step02_dir: Path, matched_users: set, model, batch_size
 
         n_reviews_encoded += len(combined)
         users_seen.update(combined["user_url"].unique())
+        files_processed += 1
+
+        # Mark file as done
+        if processed_marker_dir:
+            (processed_marker_dir / f"{f.stem}.done").touch()
+
+        # Save checkpoint every N files
+        if processed_marker_dir and files_processed % CHECKPOINT_EVERY == 0:
+            _save_checkpoint(checkpoint_dir, sum_partials, count_partials, emb_cols)
+            info(f"[checkpoint] Saved checkpoint after {files_processed} file(s)")
+
         bar.set_postfix(reviews=n_reviews_encoded, users=len(users_seen))
 
-    info("[embed] Summing per-file partials...")
+    info("[embed] Aggregating per-file partials (incremental)...")
     emb_cols = [f"e{i}" for i in range(EMBEDDING_DIM)]
     means = {}
     counts = {}
+
     for pop in POPULATIONS:
         if not sum_partials[pop]:
             # No file contributed any row for this population within scope
-            # (e.g. none of the matched users have a review in this
-            # language) - keep the shape consistent downstream instead of
-            # crashing on pd.concat([]).
             means[pop] = pd.DataFrame(columns=emb_cols)
             counts[pop] = pd.Series(dtype="int64")
             info(f"[embed] [{pop}] 0 user(s) with an embeddable review")
             continue
-        total_sum = pd.concat(sum_partials[pop]).groupby(level=0).sum()
-        total_count = pd.concat(count_partials[pop]).groupby(level=0).sum()
+
+        # Aggregate incrementally in small batches instead of all at once
+        # to avoid memory spike from concat'ing gigantic DataFrames
+        info(f"[embed] [{pop}] Aggregating {len(sum_partials[pop])} partial(s) incrementally...")
+        batch_size = 10
+        total_sum = None
+        total_count = None
+
+        for i in range(0, len(sum_partials[pop]), batch_size):
+            batch_sum = sum_partials[pop][i : i + batch_size]
+            batch_count = count_partials[pop][i : i + batch_size]
+
+            # Aggregate this batch
+            batch_sum_agg = pd.concat(batch_sum).groupby(level=0).sum()
+            batch_count_agg = pd.concat(batch_count).groupby(level=0).sum()
+
+            # Merge into running total
+            if total_sum is None:
+                total_sum = batch_sum_agg
+                total_count = batch_count_agg
+            else:
+                # Combine: reindex + add to align indices
+                total_sum = total_sum.add(batch_sum_agg.reindex(total_sum.index, fill_value=0), fill_value=0)
+                total_count = total_count.add(batch_count_agg.reindex(total_count.index, fill_value=0), fill_value=0)
+                # Also catch users that are in batch but not in total yet
+                new_users = batch_sum_agg.index.difference(total_sum.index)
+                if len(new_users):
+                    total_sum = pd.concat([total_sum, batch_sum_agg.loc[new_users]])
+                    total_count = pd.concat([total_count, batch_count_agg.loc[new_users]])
+
         means[pop] = total_sum.div(total_count, axis=0)
         counts[pop] = total_count
         info(f"[embed] [{pop}] {len(total_sum):,} user(s) with an embeddable review")
@@ -215,7 +310,8 @@ def main():
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer(MODEL_NAME, device=device)
 
-    means, counts = embed_and_accumulate(args.step02_dir, matched_users, model, args.batch_size)
+    checkpoint_dir = args.output.parent / f".{args.output.stem}_checkpoint"
+    means, counts = embed_and_accumulate(args.step02_dir, matched_users, model, args.batch_size, checkpoint_dir)
 
     info("Assembling final table...")
     all_users = sorted(set().union(*[means[pop].index for pop in POPULATIONS]))
@@ -232,6 +328,12 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     table.reset_index().to_parquet(args.output, index=False)
     info(f"Saved user text embeddings ({len(table)} users, {len(table.columns) + 1} columns) to: {args.output}")
+
+    # Clean up checkpoint directory on successful completion
+    if checkpoint_dir.exists():
+        import shutil
+        shutil.rmtree(checkpoint_dir)
+        info(f"Cleaned up checkpoint directory: {checkpoint_dir}")
 
     save_summary(
         {
