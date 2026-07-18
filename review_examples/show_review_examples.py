@@ -4,8 +4,10 @@ whatever score/topic data is available joined in.
 
 Pulls from up to four sources, cross-referenced by review_url/game_id:
   - step02's output (review_text, perspective_score, detoxify_score,
-    review_url, game_id, perspective_declared_language) - the base table
-    this filters and samples from.
+    review_url, game_id, perspective_declared_language, plus every other
+    column step01 originally scraped - review_date, hours_played,
+    is_recommended, user_url, detection_confidence) - the base table this
+    filters and samples from.
   - step01's games.parquet (game title, popular_tags) - joined by game_id,
     for the game_name column and the optional game_tag filter.
   - step04's output (sentiment_score), if it's provided/exists - joined by
@@ -51,7 +53,8 @@ BOILERPLATE_PATTERNS = [
 ]
 
 OUTPUT_COLUMNS = [
-    "game_id", "game_name", "review_url", "review_text", "review_text_clean", "review_lang",
+    "game_id", "game_name", "review_url", "user_url", "review_date", "is_recommended",
+    "hours_played", "review_text", "review_text_clean", "review_lang", "detection_confidence",
     "perspective_score", "detoxify_score", "sentiment_score", "topic",
 ]
 
@@ -82,7 +85,7 @@ def _resolve_lang_source(base_dir: Path, lang: str) -> Path:
     return subfolder if subfolder.is_dir() else base_dir
 
 
-def load_scored_reviews(step02_dir: Path, lang: str) -> pd.DataFrame:
+def load_scored_reviews(step02_dir: Path, lang: str, chunk_filter_fn=None) -> pd.DataFrame:
     """Base table: every step02-scored review for one language. Handles
     both the subfolder layout (read the review_lang=<lang>/ subfolder
     directly - review_lang isn't a real column there) and the flat layout
@@ -92,28 +95,43 @@ def load_scored_reviews(step02_dir: Path, lang: str) -> pd.DataFrame:
     is_subfolder = source != step02_dir
 
     files = list_parquet_files(source)
-    columns = ["review_url", "review_text", "game_id", "perspective_score", "detoxify_score"]
+    columns = [
+        "review_url", "review_text", "game_id", "perspective_score", "detoxify_score",
+        "user_url", "review_date", "is_recommended", "hours_played", "detection_confidence",
+    ]
     if not is_subfolder:
         columns += ["review_lang"]
     columns += ["perspective_declared_language"]
 
-    frames = [pd.read_parquet(f, columns=columns) for f in files]
-    df = pd.concat(frames, ignore_index=True)
-    if is_subfolder:
-        df["review_lang"] = lang
+    frames = []
+    total_excluded = 0
+    for f in files:
+        df = pd.read_parquet(f, columns=columns)
+        if is_subfolder:
+            df["review_lang"] = lang
 
-    rows_before_mask = len(df)
-    df = df[
-        (df["review_lang"] == lang) & (df["perspective_declared_language"] == lang)
-    ].copy()
-    n_excluded = rows_before_mask - len(df)
-    if n_excluded:
+        rows_before_mask = len(df)
+        df = df[
+            (df["review_lang"] == lang) & (df["perspective_declared_language"] == lang)
+        ].copy()
+        total_excluded += (rows_before_mask - len(df))
+        
+        df = df.drop(columns=["perspective_declared_language"])
+        
+        if chunk_filter_fn:
+            df = chunk_filter_fn(df)
+            
+        frames.append(df)
+
+    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=[c for c in columns if c != "perspective_declared_language"])
+
+    if total_excluded:
         info(
-            f"[{lang}] Excluded {n_excluded} row(s) not matching "
+            f"[{lang}] Excluded {total_excluded} row(s) not matching "
             f"review_lang == perspective_declared_language == '{lang}'"
         )
 
-    return df.drop(columns=["perspective_declared_language"])
+    return df
 
 
 def _game_has_tag(tags, game_tag: str) -> bool:
@@ -222,6 +240,7 @@ def get_review_examples(
     contains: str = None,
     game_tag: str = None,
     seed: int = None,
+    light_mode: bool = False,
 ) -> pd.DataFrame:
     """Main entry point - see module docstring for what's pulled from where.
 
@@ -239,11 +258,18 @@ def get_review_examples(
             (case-insensitive).
         game_tag: optional popular_tag the game must have (case-insensitive).
         seed: optional random seed for reproducible sampling.
+        light_mode: if True, filters files one by one to drastically reduce RAM usage.
     """
     games = load_games(games_path)
-    reviews = load_scored_reviews(step02_dir, lang)
-
-    filtered = filter_reviews(reviews, games, toxic=toxic, contains=contains, game_tag=game_tag)
+    
+    if light_mode:
+        def filter_chunk(chunk_df):
+            return filter_reviews(chunk_df, games, toxic=toxic, contains=contains, game_tag=game_tag)
+        filtered = load_scored_reviews(step02_dir, lang, chunk_filter_fn=filter_chunk)
+    else:
+        reviews = load_scored_reviews(step02_dir, lang)
+        filtered = filter_reviews(reviews, games, toxic=toxic, contains=contains, game_tag=game_tag)
+        
     info(f"[{lang}] {len(filtered)} review(s) match (toxic={toxic}, contains={contains!r}, game_tag={game_tag!r})")
 
     sample = sample_reviews(filtered, n=n, seed=seed)
