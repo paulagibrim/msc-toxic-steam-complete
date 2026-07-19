@@ -140,7 +140,11 @@ def run_training(settings: Settings, sample_size: Optional[int] = "auto") -> BER
     )
 
     # ── Train ──────────────────────────────────────────────────────────────────
-    mlflow.set_tracking_uri(str(settings.mlruns_dir))
+    # .as_uri() (not str()) - str() on Windows gives "C:\...\mlruns", and
+    # mlflow treats everything before the first ":" as a URI scheme, failing
+    # on scheme "c". as_uri() gives "file:///C:/.../mlruns", correct on both
+    # Windows and POSIX.
+    mlflow.set_tracking_uri(settings.mlruns_dir.as_uri())
     mlflow.set_experiment("bertopic_final_training")
 
     with mlflow.start_run(run_name="final_training") as run:

@@ -315,7 +315,12 @@ def run_search(settings: Settings, resume: bool = True) -> dict:
     """
     set_global_seed(settings.seed)
 
-    mlflow.set_tracking_uri(str(settings.mlruns_dir))
+    # .as_uri() (not str()) - on Windows, str() gives "C:\...\mlruns", and
+    # mlflow treats everything before the first ":" as a URI scheme, so it
+    # tries to look up a store builder for scheme "c" and fails. as_uri()
+    # produces "file:///C:/.../mlruns", which mlflow resolves correctly on
+    # both Windows and POSIX.
+    mlflow.set_tracking_uri(settings.mlruns_dir.as_uri())
     mlflow.set_experiment("bertopic_hyperparameter_search")
 
     logger.info(

@@ -193,7 +193,11 @@ def run_stability_analysis(settings: Settings) -> dict:
     texts              = df_index["review_text_clean"].tolist()
     total_available    = len(texts)
 
-    mlflow.set_tracking_uri(str(settings.mlruns_dir))
+    # .as_uri() (not str()) - str() on Windows gives "C:\...\mlruns", and
+    # mlflow treats everything before the first ":" as a URI scheme, failing
+    # on scheme "c". as_uri() gives "file:///C:/.../mlruns", correct on both
+    # Windows and POSIX.
+    mlflow.set_tracking_uri(settings.mlruns_dir.as_uri())
     mlflow.set_experiment("bertopic_stability_analysis")
 
     results       = []
