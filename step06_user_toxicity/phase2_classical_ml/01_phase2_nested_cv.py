@@ -87,22 +87,58 @@ def parse_args():
         "--limit-positives", type=int, default=None,
         help="VALIDATION ONLY: cap the number of outer LOO folds actually run, instead of all positives",
     )
+    parser.add_argument(
+        "--leave-toxic-out-embeddings", type=Path, default=None,
+        help="Path to 02_build_leave_toxic_out_embeddings.py's output - if given, substitutes each POSITIVE "
+        "user's embedding with one computed from their non-toxic reviews only (the leave-toxic-out circularity "
+        "control). Positives absent from this file (no non-toxic review at all) are excluded, not zero-filled - "
+        "there's nothing valid to substitute for them. Negatives are never affected.",
+    )
     return parser.parse_args()
 
 
-def load_population_data(table: pd.DataFrame, population: str) -> tuple:
+def load_population_data(table: pd.DataFrame, population: str, leave_toxic_out_df: pd.DataFrame = None) -> tuple:
     """Returns (X, y, user_urls) for one population's eligible users.
     population is 'pt', 'en', or 'union' - the label column suffix for
     union is 'pt+en' (build_toxic_user_labels.py's naming) while the
     embedding column prefix is 'union' (build_user_text_embeddings.py's
-    naming) - both are handled here so callers just say 'union'."""
+    naming) - both are handled here so callers just say 'union'.
+
+    If leave_toxic_out_df is given (the leave-toxic-out control), every
+    POSITIVE user's embedding is replaced by their entry there (computed
+    from non-toxic reviews only) - positives missing from that table (no
+    non-toxic review to embed at all) are dropped from the population
+    entirely for this run, logged so the drop is visible, not silent."""
     label_suffix = "pt+en" if population == "union" else population
     emb_prefix = population  # already "union" for that case
 
     eligible = table[f"eligible_{label_suffix}"].fillna(False)
-    subset = table.loc[eligible]
+    subset = table.loc[eligible].copy()
+    is_positive = subset[f"is_toxic_{label_suffix}"].fillna(False)
 
     emb_cols = [f"emb_{emb_prefix}_{i}" for i in range(EMBEDDING_DIM)]
+
+    if leave_toxic_out_df is not None:
+        lto_lookup = leave_toxic_out_df.set_index("user_url")[emb_cols]
+        has_lto_embedding = subset["user_url"].isin(lto_lookup.index)
+        n_dropped = int((is_positive & ~has_lto_embedding).sum())
+        info(
+            f"[{population}] [leave-toxic-out] {n_dropped:,} positive user(s) have no non-toxic review to "
+            f"substitute - excluded from this run (kept: {int((is_positive & has_lto_embedding).sum()):,} of "
+            f"{int(is_positive.sum()):,} positives)"
+        )
+        # Keep every negative, plus only positives that HAVE a substitute embedding.
+        subset = subset.loc[~is_positive | has_lto_embedding].copy()
+        is_positive = subset[f"is_toxic_{label_suffix}"].fillna(False)
+        # emb_cols are float64 in `table` (parquet's default), but
+        # lto_lookup's values are float32 - cast the columns to float32
+        # FIRST so the assignment below doesn't trigger a dtype-mismatch
+        # warning (a hard error in future pandas versions).
+        subset[emb_cols] = subset[emb_cols].astype("float32")
+        # Overwrite positives' embedding columns with their leave-toxic-out
+        # counterpart - negatives' original embeddings are untouched.
+        substituted = lto_lookup.reindex(subset.loc[is_positive, "user_url"]).to_numpy().astype("float32")
+        subset.loc[is_positive, emb_cols] = substituted
 
     # Plain float32 numpy arrays, not a pandas DataFrame - joblib's loky
     # backend automatically memory-maps large numpy arrays passed through
@@ -243,7 +279,15 @@ def main():
     table = pd.read_parquet(args.feature_table)
     info(f"Loaded feature table: {len(table):,} user(s) from {args.feature_table}")
 
-    X_profile, X_emb, y, user_urls = load_population_data(table, args.population)
+    leave_toxic_out_df = None
+    if args.leave_toxic_out_embeddings:
+        leave_toxic_out_df = pd.read_parquet(args.leave_toxic_out_embeddings)
+        info(
+            f"[leave-toxic-out] Loaded {len(leave_toxic_out_df):,} toxic user(s) with a non-toxic-only "
+            f"embedding from {args.leave_toxic_out_embeddings}"
+        )
+
+    X_profile, X_emb, y, user_urls = load_population_data(table, args.population, leave_toxic_out_df)
     del table  # the full 1179-column table is no longer needed - only this population's slice is
 
     all_pos_idx = np.where(y == 1)[0]
@@ -340,6 +384,7 @@ def main():
             "n_test_negatives": int(len(test_neg_idx)),
             "auc_pr": round(float(auc_pr), 6),
             "validation_mode": args.limit_positives is not None,
+            "leave_toxic_out_control": args.leave_toxic_out_embeddings is not None,
         },
         args.output.with_suffix(".summary.json"),
     )
