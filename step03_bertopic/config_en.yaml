@@ -134,7 +134,22 @@ optuna:
       n_components: [5, 15]
       min_dist: [0.0, 0.5]
     hdbscan:
-      min_cluster_size: [100, 3000]
+      # Expressed as a FRACTION of the language's total toxic corpus, not an
+      # absolute count. The pt corpus (33,685 toxic reviews) is ~14x smaller
+      # than en (480,729); a fixed absolute range like [100, 3000] represents
+      # a proportionally much larger minimum cluster for pt than for en,
+      # making 10+ topics structurally unreachable there (see hyperparameter
+      # search results: no pt trial ever exceeded 6 topics under the old
+      # fixed bounds, while trial with min_cluster_size~=102 - near the
+      # bottom of that fixed range - already showed outlier_rate=2.5% and
+      # the best coherence of the whole 60-trial run, just with too few
+      # topics; the fixed floor of 100 was already too large for pt).
+      # These fraction bounds equal en's old fixed [100, 3000] range exactly
+      # (100/480729, 3000/480729), so en's search space and prior results
+      # are reproduced unchanged; pt now gets a proportionally scaled range.
+      # The absolute bounds are computed at runtime from each language's
+      # total_toxic_available (see hyperparameter_search.py run_search()).
+      min_cluster_size_fraction: [0.000208, 0.006241]
       min_samples: [1, 20]
 
 # ------------------------------------------------------------------------------

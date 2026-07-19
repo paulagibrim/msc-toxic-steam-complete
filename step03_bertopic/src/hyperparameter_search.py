@@ -146,6 +146,7 @@ class _Objective:
         texts_sample: list,
         settings: Settings,
         parent_run_id: str,
+        total_toxic_available: int,
     ) -> None:
         self.emb           = embeddings_pca
         self.texts         = texts_sample
@@ -164,6 +165,28 @@ class _Objective:
             len(self.tokenized),
         )
 
+        # min_cluster_size is searched as a FRACTION of the language's total
+        # toxic corpus (not the search sample), so the same relative search
+        # space applies regardless of how large that corpus is. Resolved to
+        # absolute counts once here rather than per-trial. Bounds are computed
+        # against total_toxic_available (the full corpus), not len(texts_sample),
+        # because that absolute count is what final training (Stage 5, which
+        # trains on the full corpus by default) will actually use.
+        frac_low, frac_high = self.cfg.hdbscan_search_space["min_cluster_size_fraction"]
+        self.min_cluster_size_low  = max(2, round(total_toxic_available * frac_low))
+        self.min_cluster_size_high = max(
+            self.min_cluster_size_low + 1, round(total_toxic_available * frac_high)
+        )
+        logger.info(
+            "min_cluster_size search bounds resolved to [%d, %d] "
+            "(%.4f%%-%.4f%% of %d total toxic documents).",
+            self.min_cluster_size_low,
+            self.min_cluster_size_high,
+            100 * frac_low,
+            100 * frac_high,
+            total_toxic_available,
+        )
+
     def __call__(self, trial: optuna.Trial) -> float:
         sp = self.cfg
 
@@ -171,7 +194,9 @@ class _Objective:
         n_neighbors       = trial.suggest_int("n_neighbors",       *sp.umap_search_space["n_neighbors"])
         n_components      = trial.suggest_int("n_components",      *sp.umap_search_space["n_components"])
         min_dist          = trial.suggest_float("min_dist",        *sp.umap_search_space["min_dist"])
-        min_cluster_size  = trial.suggest_int("min_cluster_size",  *sp.hdbscan_search_space["min_cluster_size"])
+        min_cluster_size  = trial.suggest_int(
+            "min_cluster_size", self.min_cluster_size_low, self.min_cluster_size_high
+        )
         min_samples       = trial.suggest_int("min_samples",       *sp.hdbscan_search_space["min_samples"])
         # min_samples must not exceed min_cluster_size (HDBSCAN constraint)
         min_samples = min(min_samples, min_cluster_size)
@@ -358,6 +383,7 @@ def run_search(settings: Settings, resume: bool = True) -> dict:
                 texts_sample=texts_sample,
                 settings=settings,
                 parent_run_id=parent_run.info.run_id,
+                total_toxic_available=total_available,
             )
 
             with timer("Stage 3 — Optuna"):
