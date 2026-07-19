@@ -109,6 +109,8 @@ def parse_args():
 def get_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"  # Apple Silicon GPU (M1/M2/M3/M4) - PyTorch's Metal backend, not CUDA
     return "cpu"
 
 
@@ -195,8 +197,18 @@ def make_collate_fn(tokenizer):
             user_index.extend([i] * len(texts))
             labels.append(label)
 
+        # Fixed-length padding (not dynamic padding=True): every batch
+        # produces an identically-shaped tensor regardless of how long its
+        # longest review happens to be. Dynamic padding wastes less
+        # compute on short sequences, but was found to fragment MPS's
+        # (Apple GPU) caching allocator over a long training run - each
+        # differently-shaped batch needs a differently-sized memory block,
+        # and blocks freed from one shape can't be reused for another,
+        # so usage crept up until it OOM'd (crashed at batch 72/17,905 of
+        # fold 1 on a 32GB M4 Pro). Fixed shape lets the allocator reuse
+        # the exact same blocks batch after batch.
         encoded = tokenizer(
-            all_texts, padding=True, truncation=True, max_length=MAX_SEQ_LENGTH, return_tensors="pt",
+            all_texts, padding="max_length", truncation=True, max_length=MAX_SEQ_LENGTH, return_tensors="pt",
         )
         return {
             "input_ids": encoded["input_ids"],
@@ -255,11 +267,13 @@ def train_one_fold(
     train_dataset = BagDataset(train_bags, train_y, max_reviews=max_reviews_per_user_train)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
+    CACHE_CLEAR_EVERY = 20  # batches - see note below
+
     model.train()
     for epoch in range(epochs):
         epoch_loss = 0.0
         bar = tqdm(train_loader, desc=f"  epoch {epoch + 1}/{epochs}", unit="batch")
-        for batch in bar:
+        for step, batch in enumerate(bar):
             optimizer.zero_grad()
             logits = model(
                 batch["input_ids"].to(device), batch["attention_mask"].to(device),
@@ -270,6 +284,15 @@ def train_one_fold(
             optimizer.step()
             epoch_loss += loss.item()
             bar.set_postfix(loss=epoch_loss / (bar.n + 1))
+
+            # Periodic cache release (not just once at the very end of the
+            # fold, as before) - PyTorch's MPS/CUDA caching allocators hold
+            # freed blocks for reuse rather than returning them to the OS,
+            # and were observed to still creep upward over many steps even
+            # with fixed-shape batches - this bounds how much accumulates
+            # before being released.
+            if device in ("cuda", "mps") and (step + 1) % CACHE_CLEAR_EVERY == 0:
+                (torch.cuda if device == "cuda" else torch.mps).empty_cache()
         info(f"  epoch {epoch + 1}/{epochs} - mean loss: {epoch_loss / len(train_loader):.4f}")
 
     model.eval()
@@ -289,6 +312,8 @@ def train_one_fold(
     del model
     if device == "cuda":
         torch.cuda.empty_cache()
+    elif device == "mps":
+        torch.mps.empty_cache()
 
     return np.array(predictions)
 
