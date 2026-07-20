@@ -85,13 +85,19 @@ def _compute_topic_overlap(model_a: BERTopic, model_b: BERTopic, top_n: int) -> 
     ctfidf_a = ctfidf_a[:n, :]
     ctfidf_b = ctfidf_b[:n, :]
 
-    # Handle vocabulary mismatch: both c-TF-IDF matrices must share the same
-    # column space.  BERTopic can produce different vocabularies at different
-    # sample sizes.  We skip the similarity calculation in that case and return
-    # NaN so the caller can flag it.
+    # Both c-TF-IDF matrices must share the same column space to be compared.
+    # _run_one_size() now builds every rung's CountVectorizer with a shared,
+    # pre-fitted vocabulary (see run_stability_analysis()), so this should
+    # never fire in practice; kept as a safety net rather than an expected
+    # path (it used to be the normal case, back when each rung re-fit its own
+    # vocabulary from scratch and produced a different column count every
+    # time - that was the actual reason stability_score was always None).
     if ctfidf_a.shape[1] != ctfidf_b.shape[1]:
         logger.warning(
-            "Vocabulary size mismatch (%d vs %d); stability score will be NaN.",
+            "Vocabulary size mismatch (%d vs %d) despite shared fixed "
+            "vocabulary; stability score will be NaN. This should not "
+            "happen - check that both models were built with the same "
+            "fixed_vocabulary.",
             ctfidf_a.shape[1],
             ctfidf_b.shape[1],
         )
@@ -110,6 +116,8 @@ def _run_one_size(
     texts: list,
     best_params: dict,
     settings: Settings,
+    stop_words: list,
+    fixed_vocabulary: dict,
 ) -> tuple[BERTopic, dict]:
     """Train a BERTopic model on sample_size documents and return it with metrics."""
     rng = np.random.default_rng(settings.seed)
@@ -142,12 +150,17 @@ def _run_one_size(
         prediction_data=True,
         core_dist_n_jobs=1,
     )
-    stop_words = build_stop_words(settings.language, settings.extra_stop_words)
+    # vocabulary=fixed_vocabulary (built once from the full corpus, see
+    # run_stability_analysis()) forces every rung's c-TF-IDF matrix to share
+    # the same column space, so _compute_topic_overlap() can actually compare
+    # them - previously each rung re-fit its own vocabulary from the rung's
+    # own (differently-sized) text sample, which produced a different column
+    # count every time and made every comparison return NaN.
     model = BERTopic(
         embedding_model=None,
         umap_model=umap_,
         hdbscan_model=hdbscan_,
-        vectorizer_model=CountVectorizer(stop_words=stop_words),
+        vectorizer_model=CountVectorizer(stop_words=stop_words, vocabulary=fixed_vocabulary),
         verbose=False,
     )
 
@@ -197,6 +210,21 @@ def run_stability_analysis(settings: Settings) -> dict:
     texts              = df_index["review_text_clean"].tolist()
     total_available    = len(texts)
 
+    # Fixed vocabulary, fit ONCE on the full corpus and reused by every rung's
+    # BERTopic model (see _run_one_size()). This is what makes stability_score
+    # computable at all: without it, each rung's CountVectorizer re-fits its
+    # own vocabulary from that rung's own text sample, so c-TF-IDF matrices at
+    # different sample sizes never share the same column count and every
+    # comparison returns NaN (the vocabulary is built from the full corpus,
+    # not the largest rung, since it must be a superset of every rung's terms
+    # regardless of which fractions settings.sample_fractions lists).
+    stop_words = build_stop_words(settings.language, settings.extra_stop_words)
+    with timer("Stage 4 — Fit fixed vocabulary"):
+        vocab_vectorizer = CountVectorizer(stop_words=stop_words)
+        vocab_vectorizer.fit(texts)
+        fixed_vocabulary = vocab_vectorizer.vocabulary_
+    logger.info("Fixed vocabulary size: %d terms.", len(fixed_vocabulary))
+
     # .as_uri() (not str()) - str() on Windows gives "C:\...\mlruns", and
     # mlflow treats everything before the first ":" as a URI scheme, failing
     # on scheme "c". as_uri() gives "file:///C:/.../mlruns", correct on both
@@ -229,6 +257,8 @@ def run_stability_analysis(settings: Settings) -> dict:
                     texts=texts,
                     best_params=best_params,
                     settings=settings,
+                    stop_words=stop_words,
+                    fixed_vocabulary=fixed_vocabulary,
                 )
                 metrics["sample_fraction"] = fraction
                 models_by_size[actual_size] = model
