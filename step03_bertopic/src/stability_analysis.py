@@ -47,7 +47,7 @@ from umap import UMAP
 
 from .embeddings import load_pca_embeddings, load_toxic_index
 from .settings import Settings
-from .utils import build_stop_words, set_global_seed, timer
+from .utils import build_stop_words, scale_min_cluster_size, set_global_seed, timer
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +127,12 @@ def _run_one_size(
         random_state=settings.seed,
         n_jobs=1,
     )
+    # min_cluster_size is rescaled to this rung's sample size - see
+    # scale_min_cluster_size()'s docstring for why reusing the raw
+    # Optuna-tuned count unchanged across the stability ladder's different
+    # sample sizes was distorting the comparison between rungs.
+    min_cluster_size = scale_min_cluster_size(best_params, len(texts_sub))
     # min_samples is constrained to not exceed min_cluster_size.
-    min_cluster_size = best_params["min_cluster_size"]
     min_samples      = min(best_params.get("min_samples", 5), min_cluster_size)
     hdbscan_ = HDBSCAN(
         min_cluster_size=min_cluster_size,

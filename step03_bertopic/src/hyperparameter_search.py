@@ -411,9 +411,19 @@ def run_search(settings: Settings, resume: bool = True) -> dict:
     logger.info("Best objective value: %.4f", study.best_value)
 
     # ── Persist best params ────────────────────────────────────────────────────
+    # _search_sample_size records how many documents min_cluster_size was
+    # calibrated against. Downstream stages (Stage 4's stability ladder,
+    # Stage 5's final training) reuse best_params on differently-sized
+    # datasets; without this, they'd reapply min_cluster_size as an absolute
+    # count, silently shifting its relative meaning (e.g. a value that was
+    # ~1.2% of a 30% search sample becomes ~0.36% once applied unchanged to
+    # the full corpus). Recorded here rather than recomputed later so the
+    # ratio reflects the exact sample the search actually ran on, not
+    # whatever optuna_sample_fraction happens to be set to at read time.
+    best_params_to_save = {**best_params, "_search_sample_size": n_sample}
     settings.best_params_path.parent.mkdir(parents=True, exist_ok=True)
     with open(settings.best_params_path, "w") as f:
-        json.dump(best_params, f, indent=2)
+        json.dump(best_params_to_save, f, indent=2)
     logger.info("Best params saved to %s.", settings.best_params_path)
 
     return best_params

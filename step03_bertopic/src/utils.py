@@ -164,3 +164,56 @@ def build_stop_words(language: str, extra: List[str]) -> List[str]:
     base = set(_sw.words(language))
     base.update(extra)
     return sorted(base)
+
+
+# ── HDBSCAN parameter rescaling ─────────────────────────────────────────────────
+
+def scale_min_cluster_size(best_params: dict, target_sample_size: int) -> int:
+    """Rescale best_params['min_cluster_size'] to a different dataset size.
+
+    Optuna (Stage 3) tunes min_cluster_size as an absolute count, but that
+    count is only meaningful relative to the sample size it was searched on
+    (best_params['_search_sample_size']). Reusing it unchanged on a
+    differently-sized dataset - e.g. Stage 4's stability ladder, or Stage 5
+    training on the full corpus by default - silently shifts what fraction
+    of the data it represents (observed: a value that was ~1.2% of a 30%
+    pt search sample became ~0.36% once applied unchanged to the full
+    corpus, several times more permissive than what Optuna actually
+    evaluated). This preserves that ratio instead of the raw count.
+
+    Args:
+        best_params:        dict loaded from best_params.json. Must contain
+                             'min_cluster_size'; '_search_sample_size' is
+                             used if present.
+        target_sample_size: number of documents in the dataset this
+                             min_cluster_size will actually be applied to.
+
+    Returns:
+        min_cluster_size rescaled to target_sample_size, floored at 2
+        (HDBSCAN's minimum). If '_search_sample_size' is missing (e.g. an
+        older best_params.json saved before this field existed, or the
+        Settings.load_best_params() fallback defaults), the original
+        min_cluster_size is returned unchanged with a warning, since there
+        is no recorded basis to rescale from.
+    """
+    original = best_params["min_cluster_size"]
+    search_size = best_params.get("_search_sample_size")
+
+    if not search_size:
+        logger.warning(
+            "best_params has no '_search_sample_size' - min_cluster_size=%d "
+            "will be reused unchanged at target size %d instead of rescaled. "
+            "Re-run Stage 3 to record this field and enable rescaling.",
+            original, target_sample_size,
+        )
+        return original
+
+    ratio = original / search_size
+    scaled = max(2, round(ratio * target_sample_size))
+    logger.info(
+        "min_cluster_size rescaled: %d (at search size %d, %.4f%%) -> "
+        "%d (at target size %d, same %.4f%% ratio).",
+        original, search_size, 100 * ratio,
+        scaled, target_sample_size, 100 * ratio,
+    )
+    return scaled

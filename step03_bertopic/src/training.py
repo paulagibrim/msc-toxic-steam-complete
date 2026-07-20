@@ -35,7 +35,7 @@ from umap import UMAP
 
 from .embeddings import load_pca_embeddings, load_toxic_index
 from .settings import Settings
-from .utils import build_stop_words, set_global_seed, timer
+from .utils import build_stop_words, scale_min_cluster_size, set_global_seed, timer
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,12 @@ def run_training(settings: Settings, sample_size: Optional[int] = "auto") -> BER
         logger.info("Training on %d / %d documents.", actual_size, total_available)
 
     # ── Build sub-models ───────────────────────────────────────────────────────
-    min_cluster_size = best_params["min_cluster_size"]
+    # min_cluster_size is rescaled to actual_size - see
+    # scale_min_cluster_size()'s docstring. Without this, training on the
+    # full corpus by default would reuse the raw Optuna-tuned count (~1.2%
+    # of its ~30% search sample) as an absolute value representing a much
+    # smaller, more permissive fraction (~0.36%) of the full corpus.
+    min_cluster_size = scale_min_cluster_size(best_params, actual_size)
     min_samples      = min(best_params.get("min_samples", 5), min_cluster_size)
 
     umap_model = UMAP(
