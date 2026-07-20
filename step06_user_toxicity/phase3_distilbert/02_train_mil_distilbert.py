@@ -39,9 +39,14 @@ tail. Applied ONLY during training - evaluation always uses every review a
 test user has, uncapped, so reported metrics aren't affected by this
 efficiency measure.
 
-CLASS IMBALANCE: BCEWithLogitsLoss's pos_weight parameter (ratio of
-negatives to positives in the training fold) - the neural-network
-equivalent of Phase 2's class_weight='balanced' in scikit-learn.
+CLASS IMBALANCE: a WeightedRandomSampler on the training DataLoader, NOT
+BCEWithLogitsLoss's pos_weight (see train_one_fold's comments for why a
+~2,387x loss multiplier - pt's actual negative:positive ratio - destabilizes
+gradient-based training instead of helping, unlike Phase 2's
+class_weight='balanced', which works fine there because Logistic
+Regression is convex). The sampler instead draws positives and negatives
+with equal expected frequency per batch, resampling the rare positives
+with replacement across an epoch.
 
 --leave-toxic-out: mirrors Phase 2's circularity control for this MIL
 architecture - for POSITIVE users, individually-toxic reviews (is_toxic_
@@ -59,6 +64,7 @@ Usage:
         --n-folds 5 --epochs 3 --batch-size 8
 """
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -167,10 +173,19 @@ def load_user_bags(review_texts_path: Path, feature_table_path: Path, population
 
 
 class BagDataset(Dataset):
-    def __init__(self, bags: list, y: np.ndarray, max_reviews: int = None):
+    def __init__(self, bags: list, y: np.ndarray, max_reviews: int = None, seed: int = 0):
         self.bags = bags
         self.y = y
         self.max_reviews = max_reviews  # None at eval time - use every review
+        # A local, seeded generator (not the unseeded global np.random used
+        # by an earlier version of this class) - without this, which
+        # reviews get sampled for an over-cap user was different every run
+        # (and after every checkpoint resume), making results
+        # non-reproducible. Advances statefully across __getitem__ calls,
+        # same as any other RNG use in a data pipeline - fine with
+        # num_workers=0 (this project's default), where items are always
+        # fetched sequentially in one process.
+        self.rng = np.random.default_rng(seed)
 
     def __len__(self):
         return len(self.bags)
@@ -178,7 +193,7 @@ class BagDataset(Dataset):
     def __getitem__(self, idx):
         texts = self.bags[idx]
         if self.max_reviews is not None and len(texts) > self.max_reviews:
-            chosen = np.random.choice(len(texts), size=self.max_reviews, replace=False)
+            chosen = self.rng.choice(len(texts), size=self.max_reviews, replace=False)
             texts = [texts[i] for i in chosen]
         return texts, float(self.y[idx])
 
@@ -248,32 +263,145 @@ class MILToxicityClassifier(nn.Module):
         return logits
 
 
+EVAL_CHUNK_SIZE = 32  # reviews per forward pass during evaluation - see evaluate_bags
+
+
+def evaluate_bags(model, bags: list, tokenizer, device) -> np.ndarray:
+    """Evaluates every user's FULL bag, uncapped - by design (see module
+    docstring: reported metrics must reflect every review a test user has,
+    never a training-time efficiency cap).
+
+    NOT implemented via the same batched-across-users DataLoader path as
+    training: batching several test users together, uncapped, means the
+    single largest bag in that batch sets the tensor size for everyone in
+    it - and this corpus has users with up to ~12,780 reviews. One such
+    user sharing a batch would force a forward pass over ~12,780 x 256
+    tokens at once, an OOM risk this project already hit once for a
+    similar reason (see the fixed-padding fix earlier in this file).
+
+    Instead, evaluates users ONE AT A TIME, and for a user whose bag
+    exceeds EVAL_CHUNK_SIZE, processes their reviews in bounded chunks -
+    accumulating a running sum (and count) of per-review [CLS] vectors
+    across chunks, then dividing once at the end. This is mathematically
+    identical to pooling every review in a single pass (mean pooling is
+    associative/commutative - grouping the sum differently doesn't change
+    the result), just bounded in peak memory regardless of how many
+    reviews any single user has. Slower than multi-user batching (most
+    users have only 1-2 reviews, so batch_size effectively collapses to
+    ~1-2 most of the time) - an accepted trade-off since evaluation runs
+    once per fold, not thousands of times like a training step."""
+    model.eval()
+    predictions = []
+    with torch.no_grad():
+        for texts in tqdm(bags, desc="  evaluating", unit="user"):
+            vector_sum = None
+            for chunk_start in range(0, len(texts), EVAL_CHUNK_SIZE):
+                chunk = texts[chunk_start : chunk_start + EVAL_CHUNK_SIZE]
+                encoded = tokenizer(
+                    chunk, padding="max_length", truncation=True, max_length=MAX_SEQ_LENGTH, return_tensors="pt",
+                )
+                outputs = model.encoder(
+                    input_ids=encoded["input_ids"].to(device), attention_mask=encoded["attention_mask"].to(device),
+                )
+                chunk_vectors = outputs.last_hidden_state[:, 0, :]  # [CLS] per review in this chunk
+                chunk_sum = chunk_vectors.sum(dim=0)
+                vector_sum = chunk_sum if vector_sum is None else vector_sum + chunk_sum
+
+            pooled = (vector_sum / len(texts)).unsqueeze(0)
+            logits = model.classifier(pooled).squeeze(-1)
+            predictions.append(torch.sigmoid(logits).item())
+
+    return np.array(predictions)
+
+
+def save_inprogress_checkpoint(path: Path, model, optimizer, epoch: int, batches_done: int) -> None:
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "epoch": epoch,
+            "batches_done": batches_done,
+        },
+        path,
+    )
+
+
 def train_one_fold(
     train_bags, train_y, test_bags, test_y, tokenizer, device,
     epochs, batch_size, learning_rate, max_reviews_per_user_train,
+    fold_checkpoint_path: Path = None, fold_seed: int = 0,
 ) -> np.ndarray:
     """Trains a fresh MILToxicityClassifier on this fold's training bags,
     returns predicted probabilities for the test bags (evaluated with
-    every review a test user has, uncapped)."""
+    every review a test user has, uncapped).
+
+    If fold_checkpoint_path is given, periodically saves model/optimizer
+    state DURING training (not just once per completed fold, as
+    main()'s outer checkpoint already does) - a single fold over the full
+    population is tens of thousands of batches (was measured at 17,905 for
+    pt's fold 1 alone), so without this, any interruption mid-fold loses
+    everything trained in that fold so far. fold_seed fixes the
+    DataLoader's shuffle order so a resumed run can deterministically skip
+    the batches already completed in the epoch it was interrupted during."""
     model = MILToxicityClassifier(MODEL_NAME).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
+    start_epoch = 0
+    batches_to_skip = 0
+    if fold_checkpoint_path and fold_checkpoint_path.exists():
+        ckpt = torch.load(fold_checkpoint_path, map_location=device)
+        model.load_state_dict(ckpt["model_state"])
+        optimizer.load_state_dict(ckpt["optimizer_state"])
+        start_epoch = ckpt["epoch"]
+        batches_to_skip = ckpt["batches_done"]
+        info(f"  [checkpoint] Resuming fold from epoch {start_epoch + 1}, batch {batches_to_skip}")
+
+    # NOT a pos_weight-scaled loss (an earlier version of this script used
+    # BCEWithLogitsLoss(pos_weight=n_neg/n_pos), which computed to ~2,387
+    # for pt - fine for a convex model like Phase 2's Logistic Regression,
+    # but destructive for gradient-based fine-tuning: with batch_size=8
+    # users and ~0.04% positive prevalence, almost every batch contains
+    # ZERO positive users, so the network gets essentially no gradient
+    # signal for most of training - and on the rare batch that does
+    # contain one, a ~2,387x loss multiplier produces a gradient spike
+    # large enough to destabilize training rather than teach anything.
+    # Measured result: predicted scores collapsed to ~0.30 for positives
+    # and ~0.30 for negatives alike (AUC-PR 0.001, barely above the
+    # 0.0004 baseline) - the model had not learned to discriminate at all.
+    #
+    # Fixed by balancing at the SAMPLING level instead: a
+    # WeightedRandomSampler draws positive and negative users with equal
+    # expected frequency (positives resampled with replacement across an
+    # epoch, since there are far fewer of them) - every batch now reliably
+    # contains a healthy mix of both classes, and the loss itself can stay
+    # unweighted (pos_weight=1), avoiding the gradient-spike problem
+    # entirely.
+    loss_fn = nn.BCEWithLogitsLoss()
+
     n_pos = int(train_y.sum())
     n_neg = len(train_y) - n_pos
-    pos_weight = torch.tensor([n_neg / max(n_pos, 1)], device=device)
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    sample_weights = np.where(train_y == 1, 1.0 / max(n_pos, 1), 1.0 / max(n_neg, 1))
+    generator = torch.Generator().manual_seed(fold_seed)
+    sampler = torch.utils.data.WeightedRandomSampler(
+        weights=sample_weights, num_samples=len(train_y), replacement=True, generator=generator,
+    )
 
     collate_fn = make_collate_fn(tokenizer)
-    train_dataset = BagDataset(train_bags, train_y, max_reviews=max_reviews_per_user_train)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    train_dataset = BagDataset(train_bags, train_y, max_reviews=max_reviews_per_user_train, seed=fold_seed)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, collate_fn=collate_fn)
 
-    CACHE_CLEAR_EVERY = 20  # batches - see note below
+    CACHE_CLEAR_EVERY = 20  # batches
+    CHECKPOINT_EVERY_BATCHES = 200
 
     model.train()
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         epoch_loss = 0.0
+        skip_remaining = batches_to_skip if epoch == start_epoch else 0
         bar = tqdm(train_loader, desc=f"  epoch {epoch + 1}/{epochs}", unit="batch")
         for step, batch in enumerate(bar):
+            if step < skip_remaining:
+                continue  # deterministic replay of the same shuffle order - cheap (no forward/backward)
+
             optimizer.zero_grad()
             logits = model(
                 batch["input_ids"].to(device), batch["attention_mask"].to(device),
@@ -283,7 +411,7 @@ def train_one_fold(
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
-            bar.set_postfix(loss=epoch_loss / (bar.n + 1))
+            bar.set_postfix(loss=epoch_loss / (bar.n + 1 - skip_remaining))
 
             # Periodic cache release (not just once at the very end of the
             # fold, as before) - PyTorch's MPS/CUDA caching allocators hold
@@ -293,21 +421,15 @@ def train_one_fold(
             # before being released.
             if device in ("cuda", "mps") and (step + 1) % CACHE_CLEAR_EVERY == 0:
                 (torch.cuda if device == "cuda" else torch.mps).empty_cache()
-        info(f"  epoch {epoch + 1}/{epochs} - mean loss: {epoch_loss / len(train_loader):.4f}")
 
-    model.eval()
-    test_dataset = BagDataset(test_bags, test_y, max_reviews=None)  # uncapped at eval time
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+            if fold_checkpoint_path and (step + 1) % CHECKPOINT_EVERY_BATCHES == 0:
+                save_inprogress_checkpoint(fold_checkpoint_path, model, optimizer, epoch, step + 1)
 
-    predictions = []
-    with torch.no_grad():
-        for batch in tqdm(test_loader, desc="  evaluating", unit="batch"):
-            logits = model(
-                batch["input_ids"].to(device), batch["attention_mask"].to(device),
-                batch["user_index"].to(device), batch["n_users"],
-            )
-            probs = torch.sigmoid(logits).cpu().numpy()
-            predictions.extend(probs.tolist())
+        info(f"  epoch {epoch + 1}/{epochs} - mean loss: {epoch_loss / max(len(train_loader) - skip_remaining, 1):.4f}")
+        if fold_checkpoint_path:
+            save_inprogress_checkpoint(fold_checkpoint_path, model, optimizer, epoch + 1, 0)
+
+    predictions = evaluate_bags(model, test_bags, tokenizer, device)
 
     del model
     if device == "cuda":
@@ -346,12 +468,46 @@ def main():
     checkpoint_dir = args.output.parent / f".{args.output.stem}_checkpoint"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     fold_results_path = checkpoint_dir / "fold_predictions.parquet"
+    config_path = checkpoint_dir / "run_config.json"
+
+    # A checkpoint is only safe to resume if it was produced by an
+    # IDENTICAL invocation - a fold's train/test split membership depends
+    # on --n-folds, its training depends on --epochs/--batch-size/
+    # --learning-rate/--max-reviews-per-user-train, and its population
+    # depends on --leave-toxic-out. Reusing --output with any of these
+    # changed would otherwise silently mix fold predictions computed under
+    # different configurations into one "result" with no error at all.
+    current_config = {
+        "population": args.population,
+        "leave_toxic_out": args.leave_toxic_out,
+        "n_folds": args.n_folds,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "max_reviews_per_user_train": args.max_reviews_per_user_train,
+        "limit_users": args.limit_users,
+    }
 
     completed_folds = {}
     if fold_results_path.exists():
+        if config_path.exists():
+            saved_config = json.loads(config_path.read_text())
+            if saved_config != current_config:
+                mismatched = {
+                    k: (saved_config.get(k), current_config[k])
+                    for k in current_config if saved_config.get(k) != current_config[k]
+                }
+                raise SystemExit(
+                    f"Checkpoint at {checkpoint_dir} was produced with different arguments than this run "
+                    f"(saved -> current): {mismatched}. Resuming would silently mix incompatible fold "
+                    f"predictions. Either match the original arguments, or remove the checkpoint directory "
+                    f"to start fresh."
+                )
         existing = pd.read_parquet(fold_results_path)
         completed_folds = {int(f): sub for f, sub in existing.groupby("fold")}
         info(f"[checkpoint] Resuming: {len(completed_folds)} fold(s) already completed")
+
+    config_path.write_text(json.dumps(current_config, indent=2))
 
     skf = StratifiedKFold(n_splits=args.n_folds, shuffle=True, random_state=RANDOM_STATE)
     all_fold_predictions = []
@@ -367,10 +523,13 @@ def main():
         test_bags = [bags[i] for i in test_pos]
         test_y = y[test_pos]
 
+        fold_checkpoint_path = checkpoint_dir / f"fold_{fold_idx}_inprogress.pt"
         predictions = train_one_fold(
             train_bags, train_y, test_bags, test_y, tokenizer, device,
             args.epochs, args.batch_size, args.learning_rate, args.max_reviews_per_user_train,
+            fold_checkpoint_path=fold_checkpoint_path, fold_seed=RANDOM_STATE + fold_idx,
         )
+        fold_checkpoint_path.unlink(missing_ok=True)  # fold finished - the in-progress checkpoint is no longer needed
 
         fold_df = pd.DataFrame({
             "fold": fold_idx,
