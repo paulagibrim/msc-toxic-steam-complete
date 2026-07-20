@@ -290,16 +290,37 @@ def run_stability_analysis(settings: Settings) -> dict:
                     gc.collect()
 
         # ── Determine recommended training size ────────────────────────────────
+        # A candidate is only accepted if it ALSO clears settings.min_topics.
+        # Without this, two consecutive rungs that both collapse into the
+        # same too-small topic count (e.g. everything merging into 2 giant
+        # clusters) score a spuriously high stability_score against each
+        # other - "the same degenerate answer twice" looks identical, but
+        # isn't the meaningful convergence this check is meant to detect
+        # (observed on en: 10% and 20% both collapsed to 2 topics, scoring
+        # 0.9866 and getting picked over the real 20/23-topic structure found
+        # at 30%/40%, so Stage 5 trained on the degenerate 96,146-doc size
+        # and reproduced the same 2-topic collapse in the final model).
         recommended_size: Optional[int] = None
         for i, r in enumerate(results):
             score = r.get("stability_score")
+            if r["n_topics"] < settings.min_topics:
+                logger.info(
+                    "Skipping sample_size=%d as a stability candidate: "
+                    "n_topics=%d < min_topics=%d (likely a degenerate "
+                    "collapse, not genuine convergence).",
+                    r["sample_size"], r["n_topics"], settings.min_topics,
+                )
+                continue
             if score is not None and np.isfinite(score) and score >= settings.stability_threshold:
                 recommended_size = r["sample_size"]
                 logger.info(
-                    "Topics stabilised at sample_size=%d (score=%.4f ≥ %.2f).",
+                    "Topics stabilised at sample_size=%d (score=%.4f ≥ %.2f, "
+                    "n_topics=%d ≥ min_topics=%d).",
                     recommended_size,
                     score,
                     settings.stability_threshold,
+                    r["n_topics"],
+                    settings.min_topics,
                 )
                 break
 
