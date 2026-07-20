@@ -32,12 +32,29 @@ positives), this leaves only ~15 positives per test fold, a real
 limitation worth flagging when reporting results, not hiding.
 
 WHY A REVIEW CAP DURING TRAINING (--max-reviews-per-user-train, default
-20): a single training step must bound its compute, and one very prolific
+10): a single training step must bound its compute, and one very prolific
 user (up to ~12,780 reviews) would otherwise dominate a batch's cost.
-Since the median user has only 1-2 reviews, this cap affects only the long
-tail. Applied ONLY during training - evaluation always uses every review a
-test user has, uncapped, so reported metrics aren't affected by this
-efficiency measure.
+10 covers the vast majority of TOXIC users without truncation (mean 4.16,
+median 3 reviews - measured on this corpus's pt population; negatives
+skew even lower, mean 1.52/median 1), while keeping the fixed per-batch
+cost (see make_collate_fn) modest. Applied ONLY during training -
+evaluation always uses every review a test user has, uncapped, so
+reported metrics aren't affected by this efficiency measure.
+
+EVERY TRAINING BATCH IS PADDED TO A FIXED SHAPE, not just a capped one:
+make_collate_fn pads each user's reviews up to EXACTLY
+max_reviews_per_user_train slots (masked out of the mean-pool, not
+silently averaged in) so every batch is IDENTICALLY
+(batch_size * max_reviews_per_user_train, seq_len). Fixing sequence
+length alone (see CLEANING/padding below) was not sufficient - the
+number of reviews per batch still varied batch-to-batch (the balanced
+sampler draws ~50% toxic users, who have ~3x more reviews on average
+than non-toxic ones), and that alone kept fragmenting MPS's (Apple GPU)
+caching allocator until a fresh OOM at ~20GB allocated, 5,479 batches
+into a resumed run - well past where the sequence-length fix alone had
+gotten. The trade-off is real: every batch now costs as much as the
+worst case would have, not just occasionally - a deliberate stability-
+over-speed choice after two separate OOM crashes from shape variability.
 
 CLASS IMBALANCE: a WeightedRandomSampler on the training DataLoader, NOT
 BCEWithLogitsLoss's pos_weight (see train_one_fold's comments for why a
@@ -64,6 +81,7 @@ Usage:
         --n-folds 5 --epochs 3 --batch-size 8
 """
 import argparse
+import contextlib
 import json
 from pathlib import Path
 
@@ -78,6 +96,15 @@ from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 
 from pipeline_utils import info, save_summary
+
+def autocast_ctx(device: str):
+    """bf16 mixed precision on CUDA (A100 Tensor Cores get ~2-4x throughput
+    in bf16 vs fp32, no GradScaler needed unlike fp16) - a no-op on MPS/CPU,
+    so the Mac/consumer-GPU runs already tuned are unaffected."""
+    if device == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
+
 
 MODEL_NAME = "distilbert-base-multilingual-cased"
 MAX_SEQ_LENGTH = 256
@@ -98,8 +125,11 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=8, help="Users per training batch (default 8)")
     parser.add_argument("--learning-rate", type=float, default=2e-5, help="AdamW learning rate (default 2e-5)")
     parser.add_argument(
-        "--max-reviews-per-user-train", type=int, default=20,
-        help="Cap on reviews sampled per user DURING TRAINING ONLY (default 20) - evaluation always uses all reviews",
+        "--max-reviews-per-user-train", type=int, default=10,
+        help="Cap on reviews sampled per user DURING TRAINING ONLY (default 10, covers the vast majority of "
+        "toxic users - mean 4.16/median 3 reviews - without truncation) - evaluation always uses all reviews. "
+        "Every training batch is now padded to EXACTLY batch_size*this value (see make_collate_fn), so raising "
+        "this significantly increases the fixed per-batch compute cost, not just the worst case.",
     )
     parser.add_argument(
         "--leave-toxic-out", action="store_true",
@@ -198,7 +228,46 @@ class BagDataset(Dataset):
         return texts, float(self.y[idx])
 
 
-def make_collate_fn(tokenizer):
+def _bucket_size(actual_max: int, cap: int) -> int:
+    """Rounds actual_max UP to the next power-of-2 bucket, capped at `cap`
+    (e.g. cap=10 -> buckets are 1, 2, 4, 8, 10) - see make_collate_fn's
+    docstring for why: bounds the number of DISTINCT batch shapes MPS/CUDA's
+    caching allocator ever sees across a whole run to a handful, instead of
+    either always padding to the global cap (correctness-safe but ~3.5x
+    slower on average, since most batches don't need it) or letting shape
+    vary continuously batch-to-batch (fragments the allocator - the OOM
+    this project hit twice)."""
+    bucket = 1
+    while bucket < actual_max:
+        bucket *= 2
+    return min(bucket, cap)
+
+
+def make_collate_fn(tokenizer, fixed_reviews_per_user: int = None):
+    """fixed_reviews_per_user: if given (training only), every user in the
+    batch is padded with empty placeholder reviews up to a BUCKET size
+    (see _bucket_size) chosen from this batch's own actual max review
+    count, capped at fixed_reviews_per_user - not always padded to the
+    full cap. A review_valid mask marks which slots are real vs. padding.
+    This keeps the total number of distinct shapes MPS/CUDA ever sees
+    small (bounded by log2(cap)+1 buckets) - enough for the allocator to
+    reuse blocks and stop fragmenting - while a batch of mostly 1-2-review
+    users (the common case) still only pays for a small bucket, not the
+    full cap every time. Not just sequence length (already fixed via
+    padding="max_length"): the NUMBER of reviews per batch was still
+    varying batch-to-batch (a user's real review count, capped but not
+    padded up at all), and MPS's caching allocator fragmented on THAT
+    dimension instead - a fresh OOM was hit ~5,479 batches into a resumed
+    run, at 20GB allocated, well past where the sequence-length fix alone
+    had gotten. An earlier version of this function padded every batch to
+    the FULL cap unconditionally - it fixed the crash but made every batch
+    cost as much as the worst case, an observed ~5x slowdown in practice.
+    Padding rows are masked out of the mean-pool in
+    MILToxicityClassifier.forward, not silently averaged in - mean pooling
+    with padding included would change the result, not just its shape.
+
+    None at eval time (evaluate_bags doesn't use this collate_fn at all -
+    it processes one user's uncapped bag in its own chunks instead)."""
     def collate_fn(batch):
         """Flattens every review across the whole batch into one token
         batch for the encoder, plus a user_index array mapping each
@@ -206,22 +275,37 @@ def make_collate_fn(tokenizer):
         batch - used by the model to mean-pool per user afterward."""
         all_texts = []
         user_index = []
+        review_valid = []
         labels = []
+
+        n_slots = None
+        if fixed_reviews_per_user is not None:
+            actual_max = max(len(texts) for texts, _ in batch)
+            n_slots = _bucket_size(actual_max, fixed_reviews_per_user)
+
         for i, (texts, label) in enumerate(batch):
-            all_texts.extend(texts)
-            user_index.extend([i] * len(texts))
+            if n_slots is not None:
+                n_real = len(texts)
+                n_pad = n_slots - n_real
+                all_texts.extend(texts + [""] * n_pad)
+                user_index.extend([i] * n_slots)
+                review_valid.extend([1.0] * n_real + [0.0] * n_pad)
+            else:
+                all_texts.extend(texts)
+                user_index.extend([i] * len(texts))
+                review_valid.extend([1.0] * len(texts))
             labels.append(label)
 
-        # Fixed-length padding (not dynamic padding=True): every batch
-        # produces an identically-shaped tensor regardless of how long its
-        # longest review happens to be. Dynamic padding wastes less
-        # compute on short sequences, but was found to fragment MPS's
-        # (Apple GPU) caching allocator over a long training run - each
-        # differently-shaped batch needs a differently-sized memory block,
-        # and blocks freed from one shape can't be reused for another,
-        # so usage crept up until it OOM'd (crashed at batch 72/17,905 of
-        # fold 1 on a 32GB M4 Pro). Fixed shape lets the allocator reuse
-        # the exact same blocks batch after batch.
+        # Fixed-length padding (not dynamic padding=True): every review
+        # produces an identically-shaped token sequence regardless of how
+        # long it is. Dynamic padding wastes less compute on short
+        # sequences, but was found to fragment MPS's (Apple GPU) caching
+        # allocator over a long training run - each differently-shaped
+        # batch needs a differently-sized memory block, and blocks freed
+        # from one shape can't be reused for another, so usage crept up
+        # until it OOM'd (crashed at batch 72/17,905 of fold 1 on a 32GB
+        # M4 Pro). Fixed shape lets the allocator reuse the exact same
+        # blocks batch after batch.
         encoded = tokenizer(
             all_texts, padding="max_length", truncation=True, max_length=MAX_SEQ_LENGTH, return_tensors="pt",
         )
@@ -229,6 +313,7 @@ def make_collate_fn(tokenizer):
             "input_ids": encoded["input_ids"],
             "attention_mask": encoded["attention_mask"],
             "user_index": torch.tensor(user_index, dtype=torch.long),
+            "review_valid": torch.tensor(review_valid, dtype=torch.float32),
             "n_users": len(batch),
             "labels": torch.tensor(labels, dtype=torch.float32),
         }
@@ -247,16 +332,30 @@ class MILToxicityClassifier(nn.Module):
         hidden_size = self.encoder.config.hidden_size
         self.classifier = nn.Linear(hidden_size, 1)
 
-    def forward(self, input_ids, attention_mask, user_index, n_users):
+    def forward(self, input_ids, attention_mask, user_index, n_users, review_valid=None):
         outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
         review_vectors = outputs.last_hidden_state[:, 0, :]  # [CLS] token per review
 
         hidden_size = review_vectors.shape[1]
         device = review_vectors.device
+
+        if review_valid is not None:
+            # Padding rows (from make_collate_fn's fixed_reviews_per_user)
+            # still get a forward pass - DistilBERT has no notion of "this
+            # whole review doesn't exist" - but must NOT contribute to the
+            # pooled average. Zeroing them here and excluding them from the
+            # per-user count makes the result IDENTICAL to pooling only the
+            # real reviews (mean pooling is just a sum/count; padding rows
+            # contribute 0/0 to both), not an approximation.
+            review_vectors = review_vectors * review_valid.unsqueeze(1)
+            valid_per_review = review_valid
+        else:
+            valid_per_review = torch.ones(review_vectors.shape[0], device=device)
+
         sums = torch.zeros(n_users, hidden_size, device=device)
         sums.index_add_(0, user_index, review_vectors)
         counts = torch.zeros(n_users, device=device)
-        counts.index_add_(0, user_index, torch.ones_like(user_index, dtype=torch.float32))
+        counts.index_add_(0, user_index, valid_per_review)
         pooled = sums / counts.unsqueeze(1).clamp(min=1)
 
         logits = self.classifier(pooled).squeeze(-1)
@@ -293,16 +392,17 @@ def evaluate_bags(model, bags: list, tokenizer, device) -> np.ndarray:
     model.eval()
     predictions = []
     with torch.no_grad():
-        for texts in tqdm(bags, desc="  evaluating", unit="user"):
+        for texts in tqdm(bags, desc="  evaluating", unit="user", smoothing=0):
             vector_sum = None
             for chunk_start in range(0, len(texts), EVAL_CHUNK_SIZE):
                 chunk = texts[chunk_start : chunk_start + EVAL_CHUNK_SIZE]
                 encoded = tokenizer(
                     chunk, padding="max_length", truncation=True, max_length=MAX_SEQ_LENGTH, return_tensors="pt",
                 )
-                outputs = model.encoder(
-                    input_ids=encoded["input_ids"].to(device), attention_mask=encoded["attention_mask"].to(device),
-                )
+                with autocast_ctx(device):
+                    outputs = model.encoder(
+                        input_ids=encoded["input_ids"].to(device), attention_mask=encoded["attention_mask"].to(device),
+                    )
                 chunk_vectors = outputs.last_hidden_state[:, 0, :]  # [CLS] per review in this chunk
                 chunk_sum = chunk_vectors.sum(dim=0)
                 vector_sum = chunk_sum if vector_sum is None else vector_sum + chunk_sum
@@ -386,7 +486,14 @@ def train_one_fold(
         weights=sample_weights, num_samples=len(train_y), replacement=True, generator=generator,
     )
 
-    collate_fn = make_collate_fn(tokenizer)
+    # fixed_reviews_per_user=max_reviews_per_user_train: every training
+    # batch gets padded/masked to EXACTLY batch_size * max_reviews_per_user_train
+    # review-slots (see make_collate_fn's docstring) - the number of
+    # reviews per batch was still variable even after fixing sequence
+    # length, and that variability alone was enough to keep fragmenting
+    # MPS's allocator until it OOM'd again ~5,479 batches into a resumed
+    # run.
+    collate_fn = make_collate_fn(tokenizer, fixed_reviews_per_user=max_reviews_per_user_train)
     train_dataset = BagDataset(train_bags, train_y, max_reviews=max_reviews_per_user_train, seed=fold_seed)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, collate_fn=collate_fn)
 
@@ -397,17 +504,26 @@ def train_one_fold(
     for epoch in range(start_epoch, epochs):
         epoch_loss = 0.0
         skip_remaining = batches_to_skip if epoch == start_epoch else 0
-        bar = tqdm(train_loader, desc=f"  epoch {epoch + 1}/{epochs}", unit="batch")
+        # smoothing=0: plain cumulative average (total batches / total time
+        # so far), not tqdm's default exponential weighting toward recent
+        # batches. With bucketed padding, per-batch time varies a lot
+        # (bucket 1 vs bucket 10 batches differ ~10x in compute) - the
+        # default smoothing made the ETA swing wildly (e.g. 6h to 25h)
+        # depending on which bucket sizes were hit most recently, instead
+        # of reflecting the true running average.
+        bar = tqdm(train_loader, desc=f"  epoch {epoch + 1}/{epochs}", unit="batch", smoothing=0)
         for step, batch in enumerate(bar):
             if step < skip_remaining:
                 continue  # deterministic replay of the same shuffle order - cheap (no forward/backward)
 
             optimizer.zero_grad()
-            logits = model(
-                batch["input_ids"].to(device), batch["attention_mask"].to(device),
-                batch["user_index"].to(device), batch["n_users"],
-            )
-            loss = loss_fn(logits, batch["labels"].to(device))
+            with autocast_ctx(device):
+                logits = model(
+                    batch["input_ids"].to(device), batch["attention_mask"].to(device),
+                    batch["user_index"].to(device), batch["n_users"],
+                    review_valid=batch["review_valid"].to(device),
+                )
+                loss = loss_fn(logits, batch["labels"].to(device))
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
