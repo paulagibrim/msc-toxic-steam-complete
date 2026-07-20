@@ -49,8 +49,13 @@ def parse_args():
     )
     parser.add_argument("--lang", required=True, help="Language code, e.g. 'pt' or 'en'")
     toxic_group = parser.add_mutually_exclusive_group(required=True)
-    toxic_group.add_argument("--toxic", dest="toxic", action="store_true", help="Sample toxic reviews")
+    toxic_group.add_argument("--toxic", dest="toxic", action="store_true", default=None, help="Sample toxic reviews")
     toxic_group.add_argument("--non-toxic", dest="toxic", action="store_false", help="Sample non-toxic reviews")
+    toxic_group.add_argument(
+        "--venn-set", dest="venn_set", choices=["perspective_only", "detoxify_only", "both"],
+        help="Sample from one of the three mutually-exclusive Venn regions instead of toxic/non-toxic "
+        "(same regions as run_toxicity_venn.py / tfidf_venn_set_analysis.py)",
+    )
     parser.add_argument("--n", required=True, type=int, help="Number of examples to sample")
     parser.add_argument(
         "--games", type=Path, default=None,
@@ -91,9 +96,8 @@ def main():
     step02_dir = args.step02_dir or defaults["step02_dir"]
     step04_dir = args.step04_dir or defaults["step04_dir"]
     step03_results = args.step03_results or defaults["step03_results"]
-    output = args.output or Path(
-        f"../../steam-data/examples/{'toxic' if args.toxic else 'non_toxic'}_{args.lang}.csv"
-    )
+    selector_label = args.venn_set or ("toxic" if args.toxic else "non_toxic")
+    output = args.output or Path(f"../../steam-data/examples/{selector_label}_{args.lang}.csv")
 
     if not step04_dir.exists():
         info(f"No step04 output at {step04_dir} - sentiment_score will be empty (pass --step04-dir to override).")
@@ -104,7 +108,8 @@ def main():
 
     examples = sre.get_review_examples(
         lang=args.lang,
-        toxic=args.toxic,
+        toxic=args.toxic if args.venn_set is None else None,
+        venn_set=args.venn_set,
         n=args.n,
         games_path=games_path,
         step02_dir=step02_dir,

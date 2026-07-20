@@ -149,19 +149,44 @@ def _game_has_tag(tags, game_tag: str) -> bool:
 def filter_reviews(
     df: pd.DataFrame,
     games: pd.DataFrame,
-    toxic: bool,
+    toxic: bool = None,
+    venn_set: str = None,
     contains: str = None,
     game_tag: str = None,
 ) -> pd.DataFrame:
     """Applies toxicity labeling (same union rule/thresholds/invalid-score
     exclusion as elsewhere in this project), then the optional text/tag
-    filters. Returns the filtered rows, NOT yet sampled."""
+    filters. Returns the filtered rows, NOT yet sampled.
+
+    Exactly one of `toxic` (binary toxic/non-toxic) or `venn_set`
+    ('perspective_only' | 'detoxify_only' | 'both' - the same three
+    mutually-exclusive Venn regions used in run_toxicity_venn.py and
+    step05's tfidf_venn_set_analysis.py) must be given - venn_set exists
+    specifically to pull qualitative examples for a TF-IDF finding (e.g.
+    "detoxify_only reviews look neutral by term frequency - are they
+    actually toxic in context, or genuinely mislabeled?") that term-level
+    statistics alone can't answer."""
+    if (toxic is None) == (venn_set is None):
+        raise ValueError("Exactly one of `toxic` or `venn_set` must be given")
+
     perspective_valid = df["perspective_score"].between(0, 1)
     detoxify_valid = df["detoxify_score"].between(0, 1)
     df = df[perspective_valid & detoxify_valid].copy()
 
-    is_toxic = (df["perspective_score"] >= PERSPECTIVE_THRESHOLD) | (df["detoxify_score"] >= DETOXIFY_THRESHOLD)
-    df = df[is_toxic] if toxic else df[~is_toxic]
+    if venn_set is not None:
+        is_p = df["perspective_score"] >= PERSPECTIVE_THRESHOLD
+        is_d = df["detoxify_score"] >= DETOXIFY_THRESHOLD
+        region_mask = {
+            "perspective_only": is_p & ~is_d,
+            "detoxify_only": ~is_p & is_d,
+            "both": is_p & is_d,
+        }
+        if venn_set not in region_mask:
+            raise ValueError(f"venn_set must be one of {list(region_mask)}, got {venn_set!r}")
+        df = df[region_mask[venn_set]]
+    else:
+        is_toxic = (df["perspective_score"] >= PERSPECTIVE_THRESHOLD) | (df["detoxify_score"] >= DETOXIFY_THRESHOLD)
+        df = df[is_toxic] if toxic else df[~is_toxic]
 
     if contains:
         df = df[df["review_text"].str.contains(contains, case=False, na=False, regex=False)]
@@ -231,10 +256,11 @@ def attach_topics(df: pd.DataFrame, step03_results_path: Path) -> pd.DataFrame:
 
 def get_review_examples(
     lang: str,
-    toxic: bool,
     n: int,
     games_path: Path,
     step02_dir: Path,
+    toxic: bool = None,
+    venn_set: str = None,
     step04_dir: Path = None,
     step03_results_path: Path = None,
     contains: str = None,
@@ -246,10 +272,15 @@ def get_review_examples(
 
     Args:
         lang: language code, e.g. "pt" or "en".
-        toxic: True samples toxic reviews, False samples non-toxic ones.
         n: number of examples to sample (returns fewer if not enough match).
         games_path: path to step01's games.parquet.
         step02_dir: path to step02's output directory.
+        toxic: True samples toxic reviews, False samples non-toxic ones -
+            exactly one of `toxic`/`venn_set` must be given (see
+            filter_reviews).
+        venn_set: 'perspective_only' | 'detoxify_only' | 'both' - samples
+            from that Venn region instead of the binary toxic/non-toxic
+            split (see filter_reviews).
         step04_dir: path to step04's output directory - optional, omit if
             that step hasn't run yet for this language.
         step03_results_path: path to step03's classified_toxic.parquet for
@@ -261,16 +292,17 @@ def get_review_examples(
         light_mode: if True, filters files one by one to drastically reduce RAM usage.
     """
     games = load_games(games_path)
-    
+
     if light_mode:
         def filter_chunk(chunk_df):
-            return filter_reviews(chunk_df, games, toxic=toxic, contains=contains, game_tag=game_tag)
+            return filter_reviews(chunk_df, games, toxic=toxic, venn_set=venn_set, contains=contains, game_tag=game_tag)
         filtered = load_scored_reviews(step02_dir, lang, chunk_filter_fn=filter_chunk)
     else:
         reviews = load_scored_reviews(step02_dir, lang)
-        filtered = filter_reviews(reviews, games, toxic=toxic, contains=contains, game_tag=game_tag)
+        filtered = filter_reviews(reviews, games, toxic=toxic, venn_set=venn_set, contains=contains, game_tag=game_tag)
         
-    info(f"[{lang}] {len(filtered)} review(s) match (toxic={toxic}, contains={contains!r}, game_tag={game_tag!r})")
+    selector = f"venn_set={venn_set}" if venn_set is not None else f"toxic={toxic}"
+    info(f"[{lang}] {len(filtered)} review(s) match ({selector}, contains={contains!r}, game_tag={game_tag!r})")
 
     sample = sample_reviews(filtered, n=n, seed=seed)
     sample["review_text_clean"] = sample["review_text"].apply(clean_review_text)
