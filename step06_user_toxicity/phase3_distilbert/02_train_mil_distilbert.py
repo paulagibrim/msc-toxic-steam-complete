@@ -414,13 +414,26 @@ def evaluate_bags(model, bags: list, tokenizer, device) -> np.ndarray:
     return np.array(predictions)
 
 
-def save_inprogress_checkpoint(path: Path, model, optimizer, epoch: int, batches_done: int) -> None:
+def save_inprogress_checkpoint(
+    path: Path, model, optimizer, epoch: int, batches_done: int, batch_size: int, max_reviews_per_user_train: int,
+) -> None:
     torch.save(
         {
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "epoch": epoch,
             "batches_done": batches_done,
+            # Recorded so a resumed run can detect a hyperparameter change
+            # (see train_one_fold's loading logic) - "batch 600" only means
+            # the same thing on resume if the batch composition (batch_size,
+            # review cap) that produced it is unchanged. A real run hit
+            # this: batch_size was bumped from 64->96 mid-fold, and this
+            # checkpoint (with no such check at the time) silently resumed
+            # as if 600 batches of size 96 had already run, when they were
+            # actually 600 batches of size 64 - a different, incompatible
+            # amount of training progress, not caught until noticed by eye.
+            "batch_size": batch_size,
+            "max_reviews_per_user_train": max_reviews_per_user_train,
         },
         path,
     )
@@ -450,11 +463,21 @@ def train_one_fold(
     batches_to_skip = 0
     if fold_checkpoint_path and fold_checkpoint_path.exists():
         ckpt = torch.load(fold_checkpoint_path, map_location=device)
-        model.load_state_dict(ckpt["model_state"])
-        optimizer.load_state_dict(ckpt["optimizer_state"])
-        start_epoch = ckpt["epoch"]
-        batches_to_skip = ckpt["batches_done"]
-        info(f"  [checkpoint] Resuming fold from epoch {start_epoch + 1}, batch {batches_to_skip}")
+        ckpt_batch_size = ckpt.get("batch_size")
+        ckpt_max_reviews = ckpt.get("max_reviews_per_user_train")
+        if ckpt_batch_size != batch_size or ckpt_max_reviews != max_reviews_per_user_train:
+            info(
+                f"  [checkpoint] IGNORING stale in-progress checkpoint - saved with "
+                f"batch_size={ckpt_batch_size}, max_reviews_per_user_train={ckpt_max_reviews}, "
+                f"current run uses batch_size={batch_size}, max_reviews_per_user_train={max_reviews_per_user_train}. "
+                f"'batch N' means a different amount of progress under different settings - restarting this fold from scratch."
+            )
+        else:
+            model.load_state_dict(ckpt["model_state"])
+            optimizer.load_state_dict(ckpt["optimizer_state"])
+            start_epoch = ckpt["epoch"]
+            batches_to_skip = ckpt["batches_done"]
+            info(f"  [checkpoint] Resuming fold from epoch {start_epoch + 1}, batch {batches_to_skip}")
 
     # NOT a pos_weight-scaled loss (an earlier version of this script used
     # BCEWithLogitsLoss(pos_weight=n_neg/n_pos), which computed to ~2,387
@@ -539,11 +562,15 @@ def train_one_fold(
                 (torch.cuda if device == "cuda" else torch.mps).empty_cache()
 
             if fold_checkpoint_path and (step + 1) % CHECKPOINT_EVERY_BATCHES == 0:
-                save_inprogress_checkpoint(fold_checkpoint_path, model, optimizer, epoch, step + 1)
+                save_inprogress_checkpoint(
+                    fold_checkpoint_path, model, optimizer, epoch, step + 1, batch_size, max_reviews_per_user_train,
+                )
 
         info(f"  epoch {epoch + 1}/{epochs} - mean loss: {epoch_loss / max(len(train_loader) - skip_remaining, 1):.4f}")
         if fold_checkpoint_path:
-            save_inprogress_checkpoint(fold_checkpoint_path, model, optimizer, epoch + 1, 0)
+            save_inprogress_checkpoint(
+                fold_checkpoint_path, model, optimizer, epoch + 1, 0, batch_size, max_reviews_per_user_train,
+            )
 
     predictions = evaluate_bags(model, test_bags, tokenizer, device)
 
