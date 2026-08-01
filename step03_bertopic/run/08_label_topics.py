@@ -2,13 +2,17 @@
 """
 Stage 8 — LLM-Assisted Topic Labeling
 ========================================
-Samples representative example documents from each topic (from the Stage 7
-classified corpus) and asks Claude to produce a short label, a one-sentence
-description, a fixed-taxonomy category, and a copypasta suspicion flag.
+Samples representative example documents from each topic (random sample,
+fixed seed - see src/topic_labeling.py) and asks Claude to produce a short
+label, a one-sentence description, and a fixed-taxonomy category.
+
+Sample size per topic: a fixed number for every topic (default 20, see
+--n-examples). Deliberately NOT scaled by a sample-size formula - see the
+module docstring in src/topic_labeling.py for why.
 
 Usage:
     python run/08_label_topics.py --lang en --api-key sk-ant-...
-    python run/08_label_topics.py --lang pt --n-examples 20 --api-key sk-ant-...
+    python run/08_label_topics.py --lang pt --n-examples 30 --api-key sk-ant-...
     python run/08_label_topics.py --api-key sk-ant-...              # both en and pt
 
 API key: pass --api-key directly, or set it once per terminal session and
@@ -29,8 +33,7 @@ Expected inputs:
 Output:
     results/topic_labels.csv
         Columns: Topic, Count_Real, Name, Representation, label,
-                 description, category, copypasta_suspected,
-                 copypasta_evidence
+                 description, category
 """
 
 import argparse
@@ -63,8 +66,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--n-examples",
         type=int,
-        default=15,
-        help="Number of example documents sampled per topic (default: 15).",
+        default=20,
+        help="Fixed number of example documents per topic, randomly "
+             "sampled with a fixed seed (default: 20, same count for "
+             "every topic regardless of size).",
     )
     p.add_argument(
         "--api-key",
@@ -86,7 +91,13 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def run_one(lang: str, model: str, n_examples: int, api_key: str | None, max_tokens: int) -> None:
+def run_one(
+    lang: str,
+    model: str,
+    n_examples: int,
+    api_key: str | None,
+    max_tokens: int,
+) -> None:
     settings = Settings.from_lang(lang)
     settings.create_directories()
 
@@ -95,12 +106,16 @@ def run_one(lang: str, model: str, n_examples: int, api_key: str | None, max_tok
 
     print(f"\n=== [{lang}] Stage 8 — Topic Labeling ===")
     print(f"Model      : {model}")
-    print(f"N examples : {n_examples}")
+    print(f"N examples : {n_examples} (fixed)")
     print(f"Max tokens : {max_tokens}")
     print(f"Input      : {settings.results_dir}")
 
     df_labels = label_all_topics(
-        settings, model=model, n_examples=n_examples, api_key=api_key, max_tokens=max_tokens
+        settings,
+        model=model,
+        n_examples=n_examples,
+        api_key=api_key,
+        max_tokens=max_tokens,
     )
 
     print(f"\n[{lang}] Labeled {len(df_labels)} topics.")

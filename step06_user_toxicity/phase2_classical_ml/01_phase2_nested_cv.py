@@ -34,6 +34,16 @@ block is standardised then PCA-reduced to 50 dims (same reduction BERTopic
 uses in step03) - profile features pass through PCA untouched, only the
 embedding block is compressed.
 
+--text-only ABLATION: drops the profile block, keeping everything else
+identical (same population, same folds, same PCA, same tuning), so the
+AUC-PR gap against a normal run measures exactly what the profile
+metadata contributes. This matters beyond curiosity: the profile join only
+matches 42.31% of eligible users, so if text alone holds up, dropping
+profile features lets a later run use the FULL eligible population and
+roughly double the positive class (pt 75->160, en 1,225->2,479, union
+1,316->2,668) - see 03_build_user_profile_metadata.py for why the other
+57.69% can't be matched.
+
 OUTPUT: one parquet row per positive user (their out-of-fold predicted
 probability) plus one row per test-negative (their averaged out-of-fold
 probability), enough to compute an AUC-PR / precision-recall curve for the
@@ -47,6 +57,7 @@ Usage:
         --n-jobs -1
 """
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -54,9 +65,10 @@ import pandas as pd
 from joblib import Parallel, delayed
 from joblib.externals.loky import get_reusable_executor
 from sklearn.decomposition import PCA
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.metrics import average_precision_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
@@ -66,13 +78,36 @@ PROFILE_FEATURES = [
     "profile_level", "has_ban", "days_since_last_ban", "awards", "insignias",
     "library_size", "screenshots", "workshop_items", "guides", "arts", "groups", "friends_count",
 ]
-EMBEDDING_DIM = 384
+EMBEDDING_DIM = int(os.environ.get("EMBEDDING_DIM", "384"))  # override for non-MiniLM encoders, e.g. DistilBERT=768 (default 384 keeps phase2/phase4 unchanged)
 PCA_COMPONENTS = 50
 TEST_NEGATIVE_FRACTION = 0.20
 INNER_CV_FOLDS = 3
 C_CANDIDATES = [0.001, 0.01, 0.1, 1.0, 10.0]
+# HistGB's inner-CV grid, deliberately small (6 combos) - this is a
+# secondary model added to check whether a non-linear model finds a
+# stronger leave-toxic-out residual than Logistic Regression (as the
+# reference project found), not the primary classifier, so it gets a
+# lighter tuning budget than C_CANDIDATES' role for LogReg.
+HISTGB_GRID = {"learning_rate": [0.05, 0.1, 0.2], "max_leaf_nodes": [15, 31]}
 RANDOM_STATE = 42
 CHECKPOINT_EVERY = 20  # outer folds, per batch - also how often worker processes are recycled (see main())
+
+
+def build_model(model_name: str, n_inner_splits: int):
+    """Returns an unfitted estimator whose inner-CV tuning never sees the
+    held-out positive or any test-negative (fit() is only ever called on a
+    fold's training data - see run_outer_fold)."""
+    if model_name == "logreg":
+        return LogisticRegressionCV(
+            Cs=C_CANDIDATES, cv=n_inner_splits, scoring="average_precision",
+            class_weight="balanced", max_iter=2000, random_state=RANDOM_STATE, n_jobs=1,
+        )
+    if model_name == "histgb":
+        return GridSearchCV(
+            HistGradientBoostingClassifier(class_weight="balanced", random_state=RANDOM_STATE),
+            HISTGB_GRID, cv=n_inner_splits, scoring="average_precision", n_jobs=1,
+        )
+    raise ValueError(f"Unknown model: {model_name}")
 
 
 def parse_args():
@@ -83,6 +118,25 @@ def parse_args():
     parser.add_argument("--population", required=True, choices=["pt", "en", "union"], help="Which population to run")
     parser.add_argument("--output", required=True, type=Path, help="Path to write out-of-fold predictions parquet to")
     parser.add_argument("--n-jobs", type=int, default=-1, help="Parallel jobs across outer LOO folds (default: all cores)")
+    parser.add_argument(
+        "--model", choices=["logreg", "histgb"], default="logreg",
+        help="Classifier for the outer folds: 'logreg' (original, LogisticRegressionCV) or "
+        "'histgb' (HistGradientBoostingClassifier, tuned via a small inner grid search) - added to check "
+        "whether a non-linear model finds a stronger leave-toxic-out residual than logreg, as the "
+        "reference project (VKusterL) found. Use a distinct --output path per model, this script does not "
+        "namespace output files by model itself.",
+    )
+    parser.add_argument(
+        "--text-only", action="store_true",
+        help="ABLATION: drop the profile-metadata feature block, training on the (PCA-reduced) text embedding "
+        "alone. Everything else - population, folds, preprocessing, tuning - is byte-identical to a normal run, "
+        "so the AUC-PR difference isolates exactly what the profile features contribute. Motivating question: "
+        # %% - argparse %-formats help strings, so a literal percent must be escaped or --help raises.
+        "profile metadata is only available for 42.31%% of eligible users (a URL-format limitation, see "
+        "03_build_user_profile_metadata.py), so if text alone performs comparably, a later run can drop the "
+        "profile join entirely and roughly DOUBLE the positive class (pt 75->160, en 1,225->2,479, union "
+        "1,316->2,668). Use a distinct --output path, this script does not namespace output by flag.",
+    )
     parser.add_argument(
         "--limit-positives", type=int, default=None,
         help="VALIDATION ONLY: cap the number of outer LOO folds actually run, instead of all positives",
@@ -97,7 +151,26 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_population_data(table: pd.DataFrame, population: str, leave_toxic_out_df: pd.DataFrame = None) -> tuple:
+def needed_columns(population: str, text_only: bool = False) -> list:
+    """The feature-table columns one population's run actually reads - used
+    to avoid materialising the other two populations' embedding blocks (see
+    main()). Kept next to load_population_data so the two stay in sync: if
+    that function starts reading another column, it has to be listed here.
+
+    text_only omits the profile block entirely rather than reading it to
+    throw away - which also lets a run consume a table that HAS no profile
+    columns at all, i.e. phase4_text_only_fullpop's slim full-population
+    tables (that phase exists precisely because dropping profile features
+    lifts the 42.31% profile-match cap on the population)."""
+    label_suffix = "pt+en" if population == "union" else population
+    emb_prefix = population
+    base = ["user_url", f"eligible_{label_suffix}", f"is_toxic_{label_suffix}"]
+    profile = [] if text_only else PROFILE_FEATURES
+    return base + profile + [f"emb_{emb_prefix}_{i}" for i in range(EMBEDDING_DIM)]
+
+
+def load_population_data(table: pd.DataFrame, population: str, leave_toxic_out_df: pd.DataFrame = None,
+                          text_only: bool = False) -> tuple:
     """Returns (X, y, user_urls) for one population's eligible users.
     population is 'pt', 'en', or 'union' - the label column suffix for
     union is 'pt+en' (build_toxic_user_labels.py's naming) while the
@@ -113,7 +186,10 @@ def load_population_data(table: pd.DataFrame, population: str, leave_toxic_out_d
     emb_prefix = population  # already "union" for that case
 
     eligible = table[f"eligible_{label_suffix}"].fillna(False)
-    subset = table.loc[eligible].copy()
+    if eligible.all():
+        subset = table
+    else:
+        subset = table.loc[eligible].copy()
     is_positive = subset[f"is_toxic_{label_suffix}"].fillna(False)
 
     emb_cols = [f"emb_{emb_prefix}_{i}" for i in range(EMBEDDING_DIM)]
@@ -147,35 +223,70 @@ def load_population_data(table: pd.DataFrame, population: str, leave_toxic_out_d
     # Passing a DataFrame instead defeats this - it gets pickled fresh per
     # task, which is what blew up RAM (~40GB) on this project's machine
     # before this fix. float32 (not float64) also halves the footprint.
-    X_profile = subset[PROFILE_FEATURES].copy()
-    X_profile["has_ban"] = X_profile["has_ban"].astype("float32")
-    for col in PROFILE_FEATURES:
-        if col != "has_ban":
-            X_profile[col] = X_profile[col].astype("float32")
-    X_profile = X_profile.to_numpy(dtype="float32")
-    X_emb = subset[emb_cols].to_numpy(dtype="float32")
+    if text_only:
+        # Zero-width stand-in: preprocess_fold ignores it in this mode, and
+        # indexing it per fold still works, so the fold code needs no
+        # branch - and the table is allowed to lack profile columns.
+        X_profile = np.empty((len(subset), 0), dtype="float32")
+    else:
+        X_profile = subset[PROFILE_FEATURES].copy()
+        X_profile["has_ban"] = X_profile["has_ban"].astype("float32")
+        for col in PROFILE_FEATURES:
+            if col != "has_ban":
+                X_profile[col] = X_profile[col].astype("float32")
+        X_profile = X_profile.to_numpy(dtype="float32")
+    for blk in subset._mgr.blocks:
+        if blk.values.shape[0] == EMBEDDING_DIM:
+            X_emb = blk.values.T
+            break
+    else:
+        X_emb = subset[emb_cols].to_numpy(dtype="float32", copy=False)
 
     y = subset[f"is_toxic_{label_suffix}"].fillna(False).astype(int).to_numpy()
     user_urls = subset["user_url"].to_numpy()
 
-    info(f"[{population}] {len(subset):,} eligible user(s), {int(y.sum()):,} positive (toxic)")
+    # A user whose embedding is all-NaN has no usable feature at all in
+    # text-only mode and cannot be classified - and NaN reaching the
+    # estimator raises mid-fit, which on a multi-hour cluster run means
+    # losing the job rather than a row. Phase 1 measured zero such users,
+    # so this normally does nothing and stays silent; it exists because
+    # phase4_text_only_fullpop's tables cover users Phase 1 never embedded.
+    has_features = ~np.isnan(X_emb).all(axis=1)
+    if not has_features.all():
+        n_dropped = int((~has_features).sum())
+        n_pos_dropped = int(y[~has_features].sum())
+        info(
+            f"[{population}] Dropping {n_dropped:,} user(s) with no embeddable review (all-NaN embedding, "
+            f"{n_pos_dropped:,} of them positive) - they have no feature to classify on"
+        )
+        X_profile, X_emb, y, user_urls = X_profile[has_features], X_emb[has_features], y[has_features], user_urls[has_features]
+
+    info(f"[{population}] {len(y):,} eligible user(s), {int(y.sum()):,} positive (toxic)")
     return X_profile, X_emb, y, user_urls
 
 
 def preprocess_fold(train_profile_raw: np.ndarray, train_emb_raw: np.ndarray,
-                     test_profile_raw: np.ndarray, test_emb_raw: np.ndarray) -> tuple:
+                     test_profile_raw: np.ndarray, test_emb_raw: np.ndarray,
+                     text_only: bool = False) -> tuple:
     """Fits imputation/scaling/PCA on the TRAIN arrays ONLY, applies the
     fitted transforms to both train and test - never lets test data
-    influence any fitted parameter."""
-    medians = np.nanmedian(train_profile_raw, axis=0)
-    nan_mask_train = np.isnan(train_profile_raw)
-    train_profile = np.where(nan_mask_train, medians, train_profile_raw)
-    nan_mask_test = np.isnan(test_profile_raw)
-    test_profile = np.where(nan_mask_test, medians, test_profile_raw)
+    influence any fitted parameter.
 
-    profile_scaler = StandardScaler()
-    train_profile_scaled = profile_scaler.fit_transform(train_profile)
-    test_profile_scaled = profile_scaler.transform(test_profile)
+    text_only=True skips the profile block entirely (the --text-only
+    ablation): the profile arrays are still passed in and ignored rather
+    than the caller branching, so the ONLY difference between the two modes
+    is which columns reach the classifier - the embedding path, the PCA
+    fit, and the fold's random state are bit-for-bit the same either way."""
+    if not text_only:
+        medians = np.nanmedian(train_profile_raw, axis=0)
+        nan_mask_train = np.isnan(train_profile_raw)
+        train_profile = np.where(nan_mask_train, medians, train_profile_raw)
+        nan_mask_test = np.isnan(test_profile_raw)
+        test_profile = np.where(nan_mask_test, medians, test_profile_raw)
+
+        profile_scaler = StandardScaler()
+        train_profile_scaled = profile_scaler.fit_transform(train_profile)
+        test_profile_scaled = profile_scaler.transform(test_profile)
 
     # NOT StandardScaler here, deliberately: it promotes float32 input to
     # float64 internally (its incremental mean/var computation broadcasts
@@ -197,13 +308,17 @@ def preprocess_fold(train_profile_raw: np.ndarray, train_emb_raw: np.ndarray,
     train_emb_pca = pca.fit_transform(train_emb_scaled).astype("float32")
     test_emb_pca = pca.transform(test_emb_scaled).astype("float32")
 
+    if text_only:
+        return train_emb_pca, test_emb_pca
+
     X_train_final = np.hstack([train_profile_scaled, train_emb_pca]).astype("float32")
     X_test_final = np.hstack([test_profile_scaled, test_emb_pca]).astype("float32")
     return X_train_final, X_test_final
 
 
 def run_outer_fold(held_out_pos_pos: int, all_pos_idx: np.ndarray, train_neg_idx: np.ndarray,
-                    test_neg_idx: np.ndarray, X_profile: np.ndarray, X_emb: np.ndarray, y: np.ndarray) -> tuple:
+                    test_neg_idx: np.ndarray, X_profile: np.ndarray, X_emb: np.ndarray, y: np.ndarray,
+                    model_name: str, text_only: bool = False) -> tuple:
     """One LOO fold: hold out exactly one positive (by its position within
     all_pos_idx), train on every other positive + the fixed train-negatives,
     then score BOTH the held-out positive and every test-negative with this
@@ -225,13 +340,11 @@ def run_outer_fold(held_out_pos_pos: int, all_pos_idx: np.ndarray, train_neg_idx
     X_train_final, X_eval_final = preprocess_fold(
         X_profile[fold_train_idx], X_emb[fold_train_idx],
         X_profile[eval_idx], X_emb[eval_idx],
+        text_only=text_only,
     )
 
     n_inner_splits = max(2, min(INNER_CV_FOLDS, int(y_train.sum())))
-    model = LogisticRegressionCV(
-        Cs=C_CANDIDATES, cv=n_inner_splits, scoring="average_precision",
-        class_weight="balanced", max_iter=2000, random_state=RANDOM_STATE, n_jobs=1,
-    )
+    model = build_model(model_name, n_inner_splits)
     model.fit(X_train_final, y_train)
 
     scores = model.predict_proba(X_eval_final)[:, 1]
@@ -276,8 +389,21 @@ def load_checkpoint(checkpoint_dir: Path, n_test_negatives: int) -> tuple:
 def main():
     args = parse_args()
 
-    table = pd.read_parquet(args.feature_table)
-    info(f"Loaded feature table: {len(table):,} user(s) from {args.feature_table}")
+    # Read ONLY this population's columns, not all 1,179. The feature table
+    # carries all three populations' embeddings side by side (emb_pt_*,
+    # emb_en_*, emb_union_* = 1,152 of its columns), but a single run touches
+    # exactly one of them - loading the other two costs ~65% of the table's
+    # 9GB for nothing, which on a memory-constrained machine is the
+    # difference between running and thrashing into swap (observed: a pt
+    # smoke test that never finished loading in 10 minutes).
+    columns = needed_columns(args.population, args.text_only)
+    label_suffix = "pt+en" if args.population == "union" else args.population
+    table = pd.read_parquet(
+        args.feature_table,
+        columns=columns,
+        filters=[(f"eligible_{label_suffix}", "==", True)],
+    )
+    info(f"Loaded feature table: {len(table):,} eligible user(s), {len(columns)} of its columns, from {args.feature_table}")
 
     leave_toxic_out_df = None
     if args.leave_toxic_out_embeddings:
@@ -287,7 +413,7 @@ def main():
             f"embedding from {args.leave_toxic_out_embeddings}"
         )
 
-    X_profile, X_emb, y, user_urls = load_population_data(table, args.population, leave_toxic_out_df)
+    X_profile, X_emb, y, user_urls = load_population_data(table, args.population, leave_toxic_out_df, args.text_only)
     del table  # the full 1179-column table is no longer needed - only this population's slice is
 
     all_pos_idx = np.where(y == 1)[0]
@@ -323,7 +449,7 @@ def main():
         # verbose=0: joblib's own per-task logging would clutter the tqdm
         # bar - tqdm is the single source of progress now.
         results = Parallel(n_jobs=args.n_jobs, verbose=0, max_nbytes="10M")(
-            delayed(run_outer_fold)(i, all_pos_idx, train_neg_idx, test_neg_idx, X_profile, X_emb, y)
+            delayed(run_outer_fold)(i, all_pos_idx, train_neg_idx, test_neg_idx, X_profile, X_emb, y, args.model, args.text_only)
             for i in batch
         )
         for position, held_out_idx, pos_score, neg_scores in results:
@@ -377,6 +503,7 @@ def main():
     save_summary(
         {
             "population": args.population,
+            "model": args.model,
             "n_eligible": int(len(y)),
             "n_positive_total": int(len(all_pos_idx)),
             "n_outer_folds_run": n_folds_to_run,
@@ -385,6 +512,8 @@ def main():
             "auc_pr": round(float(auc_pr), 6),
             "validation_mode": args.limit_positives is not None,
             "leave_toxic_out_control": args.leave_toxic_out_embeddings is not None,
+            "text_only_ablation": args.text_only,
+            "n_features": (PCA_COMPONENTS if args.text_only else PCA_COMPONENTS + len(PROFILE_FEATURES)),
         },
         args.output.with_suffix(".summary.json"),
     )

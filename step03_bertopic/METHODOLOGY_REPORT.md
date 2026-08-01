@@ -59,11 +59,31 @@ Seed global fixada em 42 em todas as etapas estocásticas (embedding, UMAP, HDBS
 
 ### 3.7 Rotulagem semântica assistida por LLM (Stage 8)
 
-Os tópicos descobertos pelo BERTopic são identificados apenas por um conjunto de 10 palavras-chave (c-TF-IDF) — sem um rótulo interpretativo nem uma descrição legível. O Stage 8 usa a API da Anthropic (Claude) para gerar, por tópico: um rótulo curto, uma descrição de uma frase, uma categoria de uma taxonomia fixa, e uma sinalização de suspeita de *copypasta* (texto repetido/templado entre reviews).
+Os tópicos descobertos pelo BERTopic são identificados apenas por um conjunto de 10 palavras-chave (c-TF-IDF) — sem um rótulo interpretativo nem uma descrição legível. O Stage 8 usa a API da Anthropic (Claude) para gerar, por tópico: um rótulo curto, uma descrição de uma frase e uma categoria de uma taxonomia fixa.
 
-**Fonte dos exemplos por tópico:** em vez de usar `BERTopic.get_representative_docs()`, os exemplos são amostrados diretamente do `classified_toxic.parquet` (15 documentos aleatórios por tópico, seed fixa). Motivo: a serialização `safetensors` do BERTopic não preserva `representative_docs_` — essa coluna já estava sempre vazia nos CSVs exportados pelo Stage 7, mesmo antes da rotulagem via LLM. Amostrar diretamente do resultado classificado também tem a vantagem de refletir a base completa, não só a amostra de treino.
+**Fonte dos exemplos por tópico:** em vez de usar `BERTopic.get_representative_docs()`, os exemplos são amostrados diretamente do `classified_toxic.parquet` (amostra aleatória por tópico, seed fixa). Motivo: a serialização `safetensors` do BERTopic não preserva `representative_docs_` — essa coluna já estava sempre vazia nos CSVs exportados pelo Stage 7, mesmo antes da rotulagem via LLM. Amostrar diretamente do resultado classificado também tem a vantagem de refletir a base completa, não só a amostra de treino.
 
-**Taxonomia fixa de categorias:** `generic_insult`, `violence_threat`, `sexual_content`, `identity_hate`, `nationality_xenophobia`, `product_complaint`, `humor_sarcasm`, `copypasta_repetition`, `other`. Decisão consciente de usar uma lista fechada (em vez de deixar a LLM inventar categorias livremente), para permitir agregação e contagem por categoria depois. Combinado explicitamente que a taxonomia seria revisada caso uma proporção alta de tópicos caísse em `other` — o que não se confirmou (ver §7).
+**Número de exemplos por tópico: 20, fixo para todos os tópicos.** Uma versão anterior desta etapa calculava esse número por tópico via a fórmula de Cochran (com correção por população finita), na tentativa de dar mais exemplos a tópicos maiores. Essa abordagem foi abandonada: a fórmula de Cochran estima uma *proporção populacional* dentro de uma margem de erro — não é o mesmo objeto estatístico que "quantos exemplos de texto uma LLM precisa ler para caracterizar o tema dominante de um tópico" —, então não é possível reivindicar honestamente uma margem de erro ou nível de confiança para essa tarefa usando essa fórmula. O sinal estatístico real de cada tópico já está nas palavras-chave c-TF-IDF, calculadas sobre 100% dos documentos do tópico (não uma amostra). Os 20 exemplos de texto enviados à LLM servem apenas como **ilustração/contexto qualitativo** para ajudar a interpretar corretamente esse sinal (ex.: confirmar se "matar" no cluster se refere a violência real ou a gameplay) — não como uma estimativa estatística da composição do tópico. Por isso, um valor fixo, amostrado aleatoriamente com seed fixa (sem o viés de seleção que a abordagem por centróide, testada e descartada, apresentava), é a escolha metodologicamente mais honesta: nem finge uma precisão estatística que não existe, nem varia de forma não-justificada entre tópicos.
+
+**Taxonomia fixa de categorias:** `generic_insult`, `violence_threat`, `sexual_content`, `identity_hate`, `nationality_xenophobia`, `product_complaint`, `humor_sarcasm`, `other`. Decisão consciente de usar uma lista fechada (em vez de deixar a LLM inventar categorias livremente), para permitir agregação e contagem por categoria depois. Combinado explicitamente que a taxonomia seria revisada caso uma proporção alta de tópicos caísse em `other` — o que não se confirmou (ver §7).
+
+Origem de cada categoria, dividida em dois grupos:
+
+- **Herdadas diretamente dos próprios atributos do Perspective API / Detoxify** — as ferramentas que geraram o rótulo `is_toxic` nas etapas anteriores do pipeline (colunas `toxicity`, `severe_toxicity`, `obscene`, `identity_attack`, `insult`, `threat`, `sexual_explicit`):
+  - `identity_hate` ← `identity_attack`
+  - `violence_threat` ← `threat`
+  - `sexual_content` ← `sexual_explicit`
+  - `generic_insult` ← `insult` / `obscene`
+
+  Mantém continuidade metodológica com os classificadores de toxicidade que já geraram a base: se o Perspective mede essas dimensões, a rotulagem semântica reconhece as mesmas categorias em vez de introduzir um vocabulário novo e desconectado.
+
+- **Adicionadas a partir de padrões observados empiricamente na inspeção inicial dos tópicos, antes de o Stage 8 existir** — não derivam do Perspective/Detoxify:
+  - `nationality_xenophobia` — tópicos inteiros dedicados a hostilidade por nacionalidade apareceram repetidamente nos dois idiomas (EN: `russian/russia/toxic`, `chinese/china/japanese`; PT: `argentino/argentinos/brasil`, ver §7.1). O Perspective só tem `identity_attack` genérico, que não distingue esse padrão de rivalidade nacional — comum na cultura de toxicidade em jogos online — de racismo/homofobia clássicos, daí a categoria própria.
+  - `product_complaint` — uma fração muito grande do que foi marcado como "tóxico" (o maior tópico de cada idioma: 35% no EN, ~30% no PT) é reclamação raivosa sobre qualidade do jogo, não hostilidade contra pessoas. O Perspective não distingue "toxicidade contra o produto" de "toxicidade contra alguém"; essa categoria existe para operacionalizar essa distinção, central para a discussão da dissertação sobre toxicidade ≠ sentimento negativo.
+  - `humor_sarcasm` — conecta com o achado da §7.2 (violência ficcional como falso positivo): boa parte do conteúdo marcado como tóxico é registro de humor/exagero, não hostilidade real. A categoria existe para o LLM sinalizar quando o tom é de brincadeira.
+  - `other` — resíduo necessário de qualquer taxonomia fechada, com o critério de revisão já descrito acima.
+
+Ressalva importante: a escolha das quatro categorias do segundo grupo baseia-se em raciocínio de domínio sobre temas plausíveis no discurso tóxico de reviews de jogos (e em padrões já visíveis nos dados antes da rotulagem), não em um método estatístico/empírico rigoroso de derivação de categorias — isso é declarado aqui de forma explícita para não superestimar o rigor da escolha.
 
 **Enquadramento do prompt:** o system prompt deixa explícito que se trata de pesquisa acadêmica de moderação de conteúdo, que os textos são dados já coletados (não conteúdo a ser gerado), e instrui o modelo a não recusar nem suavizar a tarefa por questões de segurança — mas também a não reproduzir slurs/palavrões literalmente no campo de rótulo (só de forma clínica na descrição, quando necessário).
 
@@ -133,8 +153,10 @@ A diferença de tratamento entre os dois idiomas é, portanto, **uma consequênc
 | `n_components` | 10 | 13 |
 | `min_dist` | 0,0148 | 0,0166 |
 | `min_cluster_size` (calibrado na busca) | 376 (sobre amostra de 144.219) | 110 (sobre amostra de 10.106) |
-| `min_cluster_size` (reescalado p/ treino final) | 1.253 (sobre 480.729) | ~147 (sobre 13.474) |
+| `min_cluster_size` (reescalado p/ treino final) | 1.253 (sobre 480.729) | 147 (sobre 13.474) |
 | `min_samples` | 9 | 20 |
+
+> **Fonte:** `steam-data/step03-output/{en,pt}/optuna/best_params.json` (hiperparâmetros e `_search_sample_size`). O valor reescalado de `min_cluster_size` é registrado no log `results/logs/05_train.log` de cada idioma. *Atenção:* existem arquivos legados órfãos no mesmo diretório (`best_params_pt.json` sem `_search_sample_size`, valores antigos como `min_cluster_size=221`) que **não** correspondem ao resultado final — o arquivo canônico é `best_params.json` (sem sufixo de idioma).
 
 ### 6.2 Treino final
 
@@ -142,7 +164,9 @@ A diferença de tratamento entre os dois idiomas é, portanto, **uma consequênc
 |---|---|---|
 | Tamanho de treino | 480.729 (100% — extrapolação do UMAP não confiável na amostra recomendada) | 13.474 (40% — convergência validada empiricamente) |
 | Tópicos encontrados | 23 | 15 |
-| Outlier rate (no ajuste) | 25,0% | 29,5% |
+| Outlier rate (no ajuste) | 25,0% (0,2496) | 29,5% (0,2950) |
+
+> **Fonte:** experimento `bertopic_final_training` no MLflow de cada idioma (`steam-data/step03-output/{en,pt}/mlruns/`), run mais recente por timestamp — métricas `training_size`, `n_topics`, `outlier_rate`. Também espelhado no log `results/logs/05_train.log`. *Atenção:* o MLflow contém runs antigos e inválidos do mesmo experimento (ex.: EN com 76 tópicos e PT com 25 tópicos, de execuções anteriores aos fixes da §4) — o run válido é o de timestamp mais alto.
 
 ### 6.3 Classificação da base completa (Stage 6/7)
 
@@ -151,6 +175,8 @@ A diferença de tratamento entre os dois idiomas é, portanto, **uma consequênc
 | Tópicos com documentos | 23 de 23 | 15 de 15 |
 | **Outlier rate** | **4,03%** | **4,23%** |
 | Menor tópico | 5.485 docs | 642 docs |
+
+> **Fonte:** `steam-data/step03-output/{en,pt}/results/topic_info_real_counts.csv` (coluna `Count_Real`, uma linha por tópico incluindo o `-1`). O parquet completo com a atribuição documento-a-documento está em `results/classified_toxic.parquet`.
 
 > **Nota:** a taxa de outliers na classificação da base completa (Stage 6/7, via `.transform()`) é sistematicamente menor que a taxa observada no ajuste do modelo (Stage 5, via `fit_transform()`). Isso é esperado: `hdbscan.approximate_predict()` (usado no `.transform()`) tende a atribuir documentos a clusters existentes de forma mais permissiva que a clusterização original por densidade. O número mais relevante para a seção de resultados é o da classificação da base completa, pois é ele que reflete a cobertura real do corpus tóxico inteiro.
 
@@ -186,11 +212,27 @@ Tabelas completas (todos os tópicos, todas as colunas) disponíveis em:
 - `steam-data/step03-output/en/results/topic_info_real_counts.csv`
 - `steam-data/step03-output/pt/results/topic_info_real_counts.csv`
 
+### 6.5 Coerência semântica (`c_npmi`)
+
+Como a coerência `c_npmi` é o componente central da função objetivo do Optuna (§3.4), reportam-se dois valores distintos, que **não são diretamente comparáveis** entre si (medem modelos diferentes, sobre conjuntos de documentos diferentes):
+
+| | EN | PT |
+|---|---|---|
+| `c_npmi` na busca (Optuna, trial vencedor, amostra de 30%) | 0,0021 | 0,0114 |
+| `c_npmi` do modelo final (sobre o corpus de treino real) | **0,0498** | **-0,0638** |
+
+- **Valor da busca**: registrado no MLflow do trial vencedor, calculado sobre a amostra de 30% usada na busca (144.219 docs no EN, 10.106 no PT) e sobre o número de tópicos daquele trial (20 no EN, 12 no PT). É o número que orientou a escolha dos hiperparâmetros.
+- **Valor do modelo final**: recalculado *post hoc* sobre o corpus de treino efetivo de cada modelo final (480.729 docs / 23 tópicos no EN; 13.474 docs / 15 tópicos no PT), com a mesma função `compute_coherence` (`c_npmi`, top-10 palavras) usada na busca. É o número que representa de fato o modelo reportado nas tabelas de tópicos.
+
+**Interpretação:** o `c_npmi` varia de -1 a +1; valores próximos de zero indicam coerência léxica fraca-a-neutra. O EN melhorou ao ser treinado com o corpus completo (0,0021 → 0,0498). O PT ficou **ligeiramente negativo** no modelo final (-0,0638), o que é um resultado esperável e vale ser discutido na dissertação: o corpus PT é 14× menor e fortemente marcado por gírias, abreviações (`vc`, `pra`) e onomatopeias (`kkkk`), que fragmentam a co-ocorrência lexical e derrubam a coerência medida — sem que isso invalide a interpretabilidade dos tópicos (que a rotulagem via LLM na §7 confirma ser boa).
+
 ---
 
 ## 7. Rotulagem Semântica dos Tópicos (Stage 8 — resultado)
 
-Rotulagem executada com `claude-fable-5` (após validação prévia sem erros com `claude-haiku-4-5`), sobre os tópicos finais de ambos os idiomas. Tabelas completas em:
+> **Nota de atualização:** os números desta seção (§7.1 e §7.2) vêm de uma execução com `claude-fable-5` sobre uma configuração anterior do Stage 8, que desde então foi revertida (ver §3.7 para a configuração atual e a justificativa da mudança). Os rótulos/categorias abaixo devem ser tratados como preliminares até uma nova execução com a configuração vigente.
+
+Tabelas completas em:
 - `steam-data/step03-output/en/results/topic_labels.csv`
 - `steam-data/step03-output/pt/results/topic_labels.csv`
 
@@ -206,7 +248,6 @@ Rotulagem executada com `claude-fable-5` (após validação prévia sem erros co
 | `nationality_xenophobia` | 2 | 1 |
 | `identity_hate` | 2 | 0 |
 | `violence_threat` | 0 | 0 |
-| `copypasta_repetition` | 0 | 0 |
 
 > O tópico de nazistas/comunistas em PT (tópico 12) foi classificado como `humor_sarcasm`, não `violence_threat` — o LLM interpretou o registro como entusiasmo hiperbólico/jocoso sobre a mecânica de jogo, não como ameaça real. Nenhum tópico caiu em `violence_threat` em nenhum dos dois idiomas.
 
@@ -214,34 +255,18 @@ Nenhum idioma concentrou uma proporção alta de tópicos em `other` (3/24 no EN
 
 ### 7.2 Achado qualitativo: violência ficcional/de jogo como possível falso positivo
 
-Um padrão semântico se repete de forma consistente **nos dois idiomas**, concentrado sobretudo nos tópicos que caíram em `other`: o LLM descreve reviews sobre matar zumbis, nazistas ou demônios *dentro do jogo* como prováveis falsos positivos do classificador de toxicidade original (Perspective/Detoxify), por reconhecer palavras de violência (kill, matar, shoot) sem que exista hostilidade real direcionada a alguém.
+Um padrão semântico se repete de forma consistente **nos dois idiomas**: o LLM descreve reviews sobre matar zumbis, nazistas ou demônios *dentro do jogo* como prováveis falsos positivos do classificador de toxicidade original (Perspective/Detoxify), por reconhecer palavras de violência (kill, matar, shoot) sem que exista hostilidade real direcionada a alguém. Esse padrão aparece justamente na maioria dos tópicos que caíram em `other` (a categoria "sobra" da taxonomia), mas também em tópicos que o LLM acabou classificando como `humor_sarcasm`:
 
-- **EN** — tópico 9 ("In-Game Nazi Killing Enthusiasm"): *"...using graphic violent language that likely triggered the toxicity classifier despite referring to fictional gameplay rather than real-world threats."*
-- **EN** — tópico 15 ("In-Game Demon Killing Descriptions"): mesmo padrão, associado a Doom/Dark Souls/God of War.
-- **PT** — tópicos 1, 7, 10 (matar/morrer, demônios): mesmo padrão, com o LLM descrevendo o registro como "hiperbólico ou humorístico de jogador" em vez de ameaça real.
+- **EN** — tópicos 9 ("In-Game Nazi Killing Enthusiasm") e 15 ("In-Game Demon Killing Descriptions"), **ambos em `other`**: descrições explicitando *"...graphic violent language that likely triggered the toxicity classifier despite referring to fictional gameplay rather than real-world threats"* (tópico 9) e o mesmo padrão associado a Doom/Dark Souls/God of War (tópico 15).
+- **PT** — tópicos 1 e 10 ("In-Game Killing And Dying Talk"), **ambos em `other`**, e tópico 7 ("Profane Demon-Slaying Game Praise"), classificado como `humor_sarcasm` mas cuja descrição também aponta *"hyperbolic violent language that triggered toxicity flags despite being largely positive reviews"*. Ou seja, o padrão de "violência de jogo tratada como toxicidade" atravessa a fronteira entre `other` e `humor_sarcasm`.
 
 Esse é um achado relevante para a discussão da dissertação sobre a distinção entre toxicidade detectada automaticamente e hostilidade genuína — o próprio processo de rotulagem semântica está sinalizando, de forma sistemática e nos dois idiomas, onde o classificador de toxicidade de origem provavelmente reagiu ao vocabulário de violência sem capturar o contexto ficcional/lúdico. Uma extensão natural da taxonomia (não implementada ainda) seria uma categoria dedicada, como `fictional_violence`, separada de `violence_threat` (reservada a ameaças/hostilidade real). Hoje nenhum tópico, em nenhum dos dois idiomas, caiu em `violence_threat` — mesmo o tópico de nazistas/comunistas em PT foi classificado como `humor_sarcasm`, reforçando que o próprio LLM já está absorvendo esse padrão de "violência de jogo ≠ ameaça real" em categorias adjacentes, sem uma categoria própria para isolá-lo explicitamente.
-
-### 7.3 Copypasta confirmado com evidência textual
-
-A suspeita de copypasta levantada na leitura das palavras-chave (relatório anterior, PT tópico 6) foi substituída por confirmação textual direta em outros tópicos, com trechos específicos apontados pelo LLM:
-
-| Idioma | Tópico | Evidência |
-|---|---|---|
-| EN | 1 (kill/shoot) | Frase "made me kill my whole family" aparece verbatim em múltiplos reviews — piada-template repetida |
-| EN | 6 (balls/sussy) | "sussy balls" — meme derivado de Among Us, templado em vários reviews |
-| PT | 3 (sexo/gay) | Palavra "sexo" repetida ~100 vezes num único review; template repetido sobre "a dalva" em outro |
-| PT | 8 (spam) | "charada eu te odeio" repetido ~17 vezes; "eu não sou louco" (meme do Coringa) repetido ~15 vezes |
-| PT | 11 (tiro/porrada) | "tiro, porrada e bomba" — bordão de programa de TV brasileiro (Ratinho) — repetido quase verbatim em pelo menos 4 reviews |
-
-Recomenda-se inspeção manual desses casos via `review_url` antes de citar como copypasta confirmado no texto final da dissertação — a sinalização do LLM é um indício forte, não uma verificação manual.
 
 ---
 
 ## 8. Próximos Passos Sugeridos
 
-1. ~~Rotulagem semântica dos tópicos~~ — **concluído** (Stage 8, §7).
-2. Inspeção manual dos casos de copypasta listados em §7.3, confirmando via os `review_url` originais.
-3. Avaliar a criação da categoria `fictional_violence` na taxonomia do Stage 8 (§7.2) e re-rotular os tópicos afetados, caso o achado seja incorporado à dissertação.
-4. Cruzamento dos tópicos com metadados de jogos (gênero, `game_id`) para checar se algum tópico se concentra em categorias específicas de jogos.
-5. Análise de sentimento por tópico (ver Capítulo de Análise Semântica da dissertação, seção pendente sobre `sentiment_score`).
+1. ~~Rotulagem semântica dos tópicos~~ — **concluído** (Stage 8, §7), mas ver a nota de atualização no início da §7: precisa ser reexecutada com a configuração atual (amostragem aleatória) antes de citar os rótulos/categorias como definitivos.
+2. Avaliar a criação da categoria `fictional_violence` na taxonomia do Stage 8 (§7.2) e re-rotular os tópicos afetados, caso o achado seja incorporado à dissertação.
+3. Cruzamento dos tópicos com metadados de jogos (gênero, `game_id`) para checar se algum tópico se concentra em categorias específicas de jogos.
+4. Análise de sentimento por tópico (ver Capítulo de Análise Semântica da dissertação, seção pendente sobre `sentiment_score`).

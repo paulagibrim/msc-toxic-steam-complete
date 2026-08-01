@@ -139,6 +139,15 @@ def parse_args():
         "--limit-users", type=int, default=None,
         help="VALIDATION ONLY: cap the number of users used (stratified), instead of the full population",
     )
+    parser.add_argument(
+        "--fold", type=int, default=None,
+        help="Run ONLY this fold index (0-based) and write its predictions to "
+        "<output_stem>.fold<N>.parquet, so folds can be parallelised across GPUs/jobs "
+        "(e.g. a SLURM array). The k-fold split uses the same fixed seed as the full run, "
+        "so a fold computed this way is IDENTICAL to that fold in the sequential run - this "
+        "only parallelises the work. Merge the per-fold files afterwards with merge_folds.py. "
+        "Omit to run all folds sequentially (default, unchanged behaviour).",
+    )
     return parser.parse_args()
 
 
@@ -583,6 +592,54 @@ def train_one_fold(
     return np.array(predictions)
 
 
+def run_single_fold(args, bags, y, user_urls, tokenizer, device):
+    """Train + evaluate ONE CV fold (--fold N) and write its out-of-fold
+    predictions to <output_stem>.fold<N>.parquet.
+
+    The split is computed with the SAME fixed seed (RANDOM_STATE) and per-fold
+    training seed (RANDOM_STATE + fold_idx) as the sequential run, so this fold's
+    result is numerically identical to that fold in the all-folds run - only the
+    work is parallelised. Merge the per-fold files with merge_folds.py.
+
+    Idempotent: re-running a fold whose output already exists is a no-op, and an
+    interrupted fold resumes from its in-progress checkpoint (same as the loop).
+    """
+    fold_idx = args.fold
+    fold_output = args.output.parent / f"{args.output.stem}.fold{fold_idx}.parquet"
+
+    if fold_output.exists():
+        info(f"[fold {fold_idx}] Output already exists ({fold_output}) - nothing to do.")
+        return
+
+    skf = StratifiedKFold(n_splits=args.n_folds, shuffle=True, random_state=RANDOM_STATE)
+    train_pos, test_pos = list(skf.split(np.zeros(len(y)), y))[fold_idx]
+
+    info(f"[{args.population}] Fold {fold_idx + 1}/{args.n_folds} (single-fold mode): "
+         f"{len(train_pos)} train, {len(test_pos)} test user(s)")
+    train_bags = [bags[i] for i in train_pos]
+    train_y = y[train_pos]
+    test_bags = [bags[i] for i in test_pos]
+    test_y = y[test_pos]
+
+    fold_output.parent.mkdir(parents=True, exist_ok=True)
+    fold_checkpoint_path = args.output.parent / f".{args.output.stem}.fold{fold_idx}_inprogress.pt"
+    predictions = train_one_fold(
+        train_bags, train_y, test_bags, test_y, tokenizer, device,
+        args.epochs, args.batch_size, args.learning_rate, args.max_reviews_per_user_train,
+        fold_checkpoint_path=fold_checkpoint_path, fold_seed=RANDOM_STATE + fold_idx,
+    )
+    fold_checkpoint_path.unlink(missing_ok=True)  # fold finished - drop the in-progress checkpoint
+
+    fold_df = pd.DataFrame({
+        "fold": fold_idx,
+        "user_url": user_urls[test_pos],
+        "y_true": test_y,
+        "y_score": predictions,
+    })
+    fold_df.to_parquet(fold_output, index=False)
+    info(f"[fold {fold_idx}] Saved {len(fold_df):,} prediction(s) to: {fold_output}")
+
+
 def main():
     args = parse_args()
 
@@ -607,6 +664,16 @@ def main():
         y = y[sampled]
         user_urls = user_urls[sampled]
         info(f"[VALIDATION MODE] Limited to {len(bags)} user(s) ({int(y.sum())} positive)")
+
+    # Single-fold mode: run just this fold and exit (see merge_folds.py to combine).
+    if args.fold is not None:
+        if not (0 <= args.fold < args.n_folds):
+            raise SystemExit(
+                f"--fold {args.fold} is out of range for --n-folds {args.n_folds} "
+                f"(valid: 0..{args.n_folds - 1})"
+            )
+        run_single_fold(args, bags, y, user_urls, tokenizer, device)
+        return
 
     checkpoint_dir = args.output.parent / f".{args.output.stem}_checkpoint"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)

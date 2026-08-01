@@ -4,7 +4,7 @@ topic_labeling.py — Stage 8: LLM-assisted topic labeling.
 Given the final classified corpus (Stage 7 output) and the topic keyword
 table, samples representative example documents per topic and asks an LLM
 (Claude, via the Anthropic API) to produce a short label, a one-sentence
-description, a fixed-taxonomy category, and a copypasta suspicion flag.
+description, and a fixed-taxonomy category.
 
 Why sample from classified_toxic.parquet instead of BERTopic's
 get_representative_docs()?
@@ -19,10 +19,24 @@ get_representative_docs()?
   model - relevant for en, whose final model was trained on 100% of the
   corpus anyway, but matters for pt, trained on a 40% subsample).
 
+How many examples per topic:
+  A fixed number (DEFAULT_N_EXAMPLES, 20) for every topic, regardless of
+  its size. This is deliberately NOT derived from a sample-size formula
+  (an earlier version used Cochran's formula with finite-population
+  correction, scaling n per topic) - Cochran's formula estimates a
+  population *proportion* within a margin of error, which is not the
+  statistical object at play here, so it cannot honestly claim a given
+  confidence/margin for "how many examples an LLM needs to characterize a
+  topic's theme". The actual population-level signal for each topic is the
+  c-TF-IDF keyword set, computed over 100% of that topic's documents -
+  these text examples are supplementary qualitative illustration/context
+  for the LLM, not the basis for a statistical estimate, so a fixed,
+  modest count (randomly sampled, unbiased, fixed seed) is the honest
+  choice rather than one dressed up with an inapplicable formula.
+
 Output:
   topic_labels.csv in settings.results_dir, with columns:
-    Topic, Count_Real, Name, Representation, label, description, category,
-    copypasta_suspected, copypasta_evidence
+    Topic, Count_Real, Name, Representation, label, description, category
 """
 
 import ast
@@ -50,11 +64,14 @@ CATEGORIES = [
     "nationality_xenophobia",
     "product_complaint",
     "humor_sarcasm",
-    "copypasta_repetition",
     "other",
 ]
 
 _LANGUAGE_NAMES = {"english": "English", "portuguese": "Portuguese"}
+
+# Fixed example count per topic - see the module docstring for why this is a
+# flat number rather than a sample-size formula.
+DEFAULT_N_EXAMPLES = 20
 
 SYSTEM_PROMPT = """You are assisting with a Master's dissertation on toxic discourse in Steam \
 game reviews. The reviews you will see were already flagged as toxic by an \
@@ -79,25 +96,21 @@ Some clusters will be broad, generic toxicity (insults with no specific \
 theme) rather than a coherent narrative - label these accurately as such \
 rather than inventing a theme that isn't there.
 
-Some clusters may contain near-identical or templated text repeated across \
-many different reviews/games ("copypasta"). Flag this if you notice it.
-
 Output ONLY valid JSON matching this schema, no other text:
 {
-  "label": string,          // 2-6 words, Title Case, e.g. "Death Threats / Violence"
-  "description": string,    // one sentence starting with "Messages that..."
-  "category": string,       // one of: generic_insult, violence_threat,
+  "label": string,          // 2-4 words, Title Case, a single term (no
+                             // slashes or alternatives), e.g. "Death Threats"
+  "description": string,    // one sentence describing what unites the cluster
+  "category": string        // one of: generic_insult, violence_threat,
                              // sexual_content, identity_hate,
                              // nationality_xenophobia, product_complaint,
-                             // humor_sarcasm, copypasta_repetition, other
-  "copypasta_suspected": boolean,
-  "copypasta_evidence": string | null   // short note if true, else null
+                             // humor_sarcasm, other
 }
 
 Always respond in English, regardless of the language of the source reviews."""
 
 
-# ── Sampling ────────────────────────────────────────────────────────────────
+# ── Sample size and selection ───────────────────────────────────────────────
 
 def sample_topic_examples(
     df: pd.DataFrame,
@@ -205,7 +218,7 @@ def call_llm(
 def label_all_topics(
     settings: Settings,
     model: str = "claude-sonnet-5",
-    n_examples: int = 15,
+    n_examples: int = DEFAULT_N_EXAMPLES,
     api_key: Optional[str] = None,
     max_tokens: int = 4096,
 ) -> pd.DataFrame:
@@ -214,11 +227,14 @@ def label_all_topics(
     Args:
         settings:   pipeline configuration for the target language.
         model:      Claude model id to use for labeling.
-        n_examples: number of example documents sampled per topic.
-        api_key:    Anthropic API key. If None, reads ANTHROPIC_API_KEY from
-                    the environment (anthropic.Anthropic()'s default).
-        max_tokens: output cap per call. See call_llm()'s docstring for why
-                    this needs headroom on always-thinking models.
+        n_examples: fixed number of randomly sampled example documents per
+                    topic (default DEFAULT_N_EXAMPLES=20 - see the module
+                    docstring for why this is a flat number for every topic
+                    rather than scaled by a sample-size formula).
+        api_key:    Anthropic API key. If None, reads ANTHROPIC_API_KEY
+                    from the environment (anthropic.Anthropic()'s default).
+        max_tokens: output cap per call. See call_llm()'s docstring for
+                    why this needs headroom on always-thinking models.
 
     Returns:
         DataFrame with one row per topic (including -1), written to
@@ -243,7 +259,7 @@ def label_all_topics(
     total = int(info["Count_Real"].sum())
 
     logger.info(
-        "Stage 8 — Labeling %d topics (%s) with model=%s, n_examples=%d.",
+        "Stage 8 — Labeling %d topics (%s) with model=%s, n_examples=%d (fixed).",
         len(info), settings.language, model, n_examples,
     )
 
@@ -262,8 +278,6 @@ def label_all_topics(
                 "label": "Unclustered / Outliers",
                 "description": "Documents that did not fit clearly into any topic cluster.",
                 "category": "other",
-                "copypasta_suspected": False,
-                "copypasta_evidence": None,
             })
             continue
 
@@ -278,7 +292,7 @@ def label_all_topics(
             logger.warning("Topic %d has no example documents; skipping LLM call.", topic_id)
             label = {
                 "label": "Insufficient Data", "description": "No example documents available.",
-                "category": "other", "copypasta_suspected": False, "copypasta_evidence": None,
+                "category": "other",
             }
         else:
             user_prompt = build_user_prompt(
@@ -291,7 +305,7 @@ def label_all_topics(
                 logger.error("LLM call failed for topic %d: %s", topic_id, exc)
                 label = {
                     "label": "LABELING_FAILED", "description": str(exc),
-                    "category": "other", "copypasta_suspected": False, "copypasta_evidence": None,
+                    "category": "other",
                 }
 
         if label.get("category") not in CATEGORIES:
@@ -300,16 +314,17 @@ def label_all_topics(
                 topic_id, label.get("category"),
             )
 
-        logger.info("Topic %d labeled: '%s' (%s)", topic_id, label.get("label"), label.get("category"))
-        bar.set_postfix(topic=topic_id, label=label.get("label"))
+        logger.info(
+            "Topic %d labeled: '%s' (%s) using n=%d examples",
+            topic_id, label.get("label"), label.get("category"), n_examples,
+        )
+        bar.set_postfix(topic=topic_id, label=label.get("label"), n=n_examples)
         rows.append({
             "Topic": topic_id, "Count_Real": count, "Name": row["Name"],
             "Representation": row["Representation"],
             "label": label.get("label"),
             "description": label.get("description"),
             "category": label.get("category"),
-            "copypasta_suspected": label.get("copypasta_suspected", False),
-            "copypasta_evidence": label.get("copypasta_evidence"),
         })
 
     df_labels = pd.DataFrame(rows).sort_values("Count_Real", ascending=False)
@@ -327,3 +342,114 @@ def label_all_topics(
         )
 
     return df_labels
+
+
+# ── Manual-labeling export (no API call) ────────────────────────────────────
+
+_MANUAL_INSTRUCTIONS = """This folder holds one ready-to-use prompt per BERTopic topic, for a fresh
+chat/session to label WITHOUT calling the Anthropic API and WITHOUT any
+context from whatever session generated these files (that is the point of
+this export - a clean, unbiased read on each topic).
+
+Files:
+  _system_prompt.txt   - the system prompt / instructions. Read this first.
+  _manifest.csv         - one row per topic: Topic, Count_Real, Name,
+                          Representation, n_examples, prompt_file.
+  topic_XXX_prompt.txt  - the per-topic user message (keywords + examples),
+                          one file per non-outlier topic.
+
+What to do:
+  1. Read _system_prompt.txt once - it defines the task, the JSON schema,
+     and the fixed category taxonomy.
+  2. For each row in _manifest.csv (in any order), read that row's
+     prompt_file and produce the JSON object described in
+     _system_prompt.txt, based only on that file's content - do not look
+     anything up about this project beyond what is in these two files.
+  3. Compile all responses into a table with columns exactly matching
+     _manifest.csv (Topic, Count_Real, Name, Representation) plus the three
+     new columns from the JSON: label, description, category.
+  4. Add the outlier row back: Topic=-1, label="Unclustered / Outliers",
+     description="Documents that did not fit clearly into any topic
+     cluster.", category="other" (Count_Real/Name/Representation for -1 are
+     in the original topic_info_real_counts.csv if you need them, not
+     reproduced here since it needs no labeling).
+  5. Save the result as topic_labels.csv."""
+
+
+def export_prompts_for_manual_labeling(
+    settings: Settings,
+    n_examples: int = DEFAULT_N_EXAMPLES,
+) -> Path:
+    """Write one ready-to-use prompt file per topic, for a human or a fresh
+    LLM session to label manually - no Anthropic API call, no cost.
+
+    Uses the exact same example-selection logic as label_all_topics() (same
+    fixed n_examples, same random sampling with the pipeline's fixed seed),
+    so a manual pass produces prompts equivalent to what the automated pass
+    would have sent - just handed off as files instead of API calls.
+
+    Args:
+        settings, n_examples: see label_all_topics()'s docstring - identical
+            semantics.
+
+    Returns:
+        Path to the output folder (settings.results_dir / "llm_prompts").
+    """
+    info_path = settings.results_dir / "topic_info_real_counts.csv"
+    if not info_path.exists():
+        raise FileNotFoundError(f"{info_path} not found. Run Stage 7 (07_export.py) first.")
+    if not settings.final_results_path.exists():
+        raise FileNotFoundError(
+            f"{settings.final_results_path} not found. Run Stage 7 (07_export.py) first."
+        )
+
+    info = pd.read_csv(info_path)
+    df_classified = pd.read_parquet(settings.final_results_path)
+    total = int(info["Count_Real"].sum())
+
+    out_dir = settings.results_dir / "llm_prompts"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    (out_dir / "_system_prompt.txt").write_text(SYSTEM_PROMPT, encoding="utf-8")
+    (out_dir / "_instructions.txt").write_text(_MANUAL_INSTRUCTIONS, encoding="utf-8")
+
+    manifest_rows = []
+    for _, row in info.sort_values("Topic").iterrows():
+        topic_id = int(row["Topic"])
+        if topic_id == -1:
+            continue  # outliers need no prompt - see _instructions.txt step 4
+        count = int(row["Count_Real"]) if pd.notna(row["Count_Real"]) else 0
+
+        keywords = (
+            ast.literal_eval(row["Representation"])
+            if isinstance(row["Representation"], str)
+            else row["Representation"]
+        )
+        examples = sample_topic_examples(df_classified, topic_id, n_examples, settings.seed)
+
+        prompt_filename = f"topic_{topic_id:03d}_prompt.txt"
+        if examples:
+            user_prompt = build_user_prompt(
+                language=settings.language, topic_id=topic_id, count=count,
+                total=total, keywords=keywords, examples=examples,
+            )
+        else:
+            user_prompt = (
+                f"Topic ID: {topic_id}\nNo example documents available for this topic."
+            )
+        (out_dir / prompt_filename).write_text(user_prompt, encoding="utf-8")
+
+        manifest_rows.append({
+            "Topic": topic_id, "Count_Real": count, "Name": row["Name"],
+            "Representation": row["Representation"], "n_examples": len(examples),
+            "prompt_file": prompt_filename,
+        })
+
+    manifest = pd.DataFrame(manifest_rows).sort_values("Topic")
+    manifest.to_csv(out_dir / "_manifest.csv", index=False, encoding="utf-8-sig")
+
+    logger.info(
+        "Exported %d topic prompts (%s) to %s for manual labeling (no API call made).",
+        len(manifest_rows), settings.language, out_dir,
+    )
+    return out_dir

@@ -1,0 +1,106 @@
+% =====================================================================
+%  DRAFT — Results section for the Semantic Analysis chapter (BERTopic)
+%  Generated to match the CANONICAL label files:
+%    steam-data/step03-output/{en,pt}/results/topic_labels.csv
+%  NOTE: the Portuguese longtable below REPLACES the previous draft table,
+%  which did not match any file on disk (it contained a `violence_threat`
+%  category that the final labelling run never assigned).
+% =====================================================================
+
+\section{Results}
+\label{sec:semantic-results}
+
+Tables~\ref{tab:semantic-topics-en} and~\ref{tab:semantic-topics-pt} report every topic recovered by the pipeline of Section~\ref{sec:semantic-method}, ordered by document count, together with the label, category, and description assigned during the LLM-assisted stage. Before turning to individual topics, it is useful to read the two models at the level of the closed taxonomy, since the categories reveal a structural pattern that recurs across both languages.
+
+Table~\ref{tab:semantic-categories} aggregates the topics of each model by category, weighting each category both by the number of topics it comprises and by the share of classified documents those topics account for. The document-weighted view is the more informative of the two, because topic counts are highly uneven: a single catch-all cluster dominates each corpus, so counting topics alone understates how much of the actual review volume falls under the broadest, least targeted categories.
+
+\begin{table}[htb]
+    \centering
+    \caption{Distribution of topics across the closed taxonomy, per language, by number of topics and by share of classified documents. The outlier cluster ($-1$) is counted under \texttt{other}. Percentages are of each language's full classified corpus.}
+    \label{tab:semantic-categories}
+    \small
+    \begin{tabular}{lrrrr}
+        \toprule
+         & \multicolumn{2}{c}{\textbf{English}} & \multicolumn{2}{c}{\textbf{Portuguese}} \\
+        \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+        \textbf{Category} & \textbf{Topics} & \textbf{\% docs} & \textbf{Topics} & \textbf{\% docs} \\
+        \midrule
+        \texttt{product\_complaint}      & 6 & 51.3 & 2 & 38.1 \\
+        \texttt{humor\_sarcasm}          & 5 & 19.5 & 8 & 33.2 \\
+        \texttt{sexual\_content}         & 4 &  8.9 & 1 &  4.9 \\
+        \texttt{other} (incl. outliers)  & 3 &  8.5 & 2 & 10.4 \\
+        \texttt{generic\_insult}         & 2 &  5.5 & 2 & 11.5 \\
+        \texttt{nationality\_xenophobia} & 2 &  3.2 & 1 &  1.9 \\
+        \texttt{identity\_hate}          & 2 &  3.1 & 0 &  0.0 \\
+        \texttt{violence\_threat}        & 0 &  0.0 & 0 &  0.0 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Two observations dominate the aggregate picture and hold for both languages. First, the categories that describe genuinely directed hostility are a small minority of the flagged volume. Three categories in the taxonomy presuppose a real human target---\texttt{identity\_hate}, \texttt{nationality\_xenophobia}, and \texttt{violence\_threat}---yet together they cover just $6.3\%$ of English documents and $1.9\%$ of Portuguese documents. The overwhelming remainder is distributed across profane product criticism, hyperbolic or humorous gameplay commentary, and crude but untargeted vulgarity. Second, and most striking, one of those three, \texttt{violence\_threat}, was assigned to no topic in either language, despite violent vocabulary being pervasive throughout both corpora---English topics built on \emph{kill}, \emph{shoot}, \emph{demons}, and \emph{nazis}, and Portuguese topics on \emph{matar}, \emph{morrer}, and \emph{tiro, porrada e bomba}. Read against the lexical analysis of Chapter~\ref{chap:charact-tfidf}, this is the central result of the semantic layer: at the level of the whole review, the model consistently recognised this vocabulary as describing fictional in-game action rather than real-world menace, precisely the distinction that a term-by-term weighting cannot draw. The topics gathered under \texttt{other}---\emph{In-Game Violence Talk}, \emph{Nazi-Killing Gameplay Praise} in English, \emph{Gameplay Killing Descriptions} in Portuguese---are the clearest instances: they exist entirely because violent gameplay language tripped the detector, and the semantic view reclassifies them as descriptions of game content rather than aggression.
+
+The corollary is that a large fraction of what the detector of Chapter~\ref{chap:detection} flagged as toxic is better understood as a register---profanity used as intensifier, punctuation, or humour---than as hostility. This is most visible in the single largest topic of each corpus, both of which are broad catch-all clusters unified only by profanity: \emph{Profane Game Complaints} in English ($168{,}545$ documents, $35.07\%$) and \emph{Profane Game Opinions} in Portuguese ($10{,}346$ documents, $30.71\%$). In each case the LLM notes that the same vulgar vocabulary is used indistinguishably to praise and to condemn, which is exactly the ambiguity that motivated moving from a lexical to a semantic characterisation in the first place.
+
+\subsection{English Corpus}
+\label{subsec:semantic-en}
+
+Read topic by topic, the English model concentrates most of its volume in two broad, largely non-hostile registers before thinning out into the targeted categories. \emph{Product complaint} is the heaviest, at $51.3\%$ of documents across six topics, and spans the full range of review discourse: the dominant catch-all cluster (topic~0), explicitly derogatory dismissals of games as worthless purchases (\emph{Vulgar Product Bashing}, $8.03\%$), ordinary critiques of story and mechanics incidentally flagged for casual profanity (\emph{Profane Game Critiques}, $2.77\%$), and more focused grievances about soundtracks (\emph{Profane Soundtrack Commentary}) and, notably, cheating (\emph{Cheater Complaints}, $1.84\%$), the latter directed at developers and anti-cheat systems rather than at other players as people. \emph{Humour and sarcasm} follows at $19.5\%$, comprising affectionate mock-insults (\emph{Playful Profane Praise}), juvenile scatological and anatomical humour (\emph{Crude Body Humor}, \emph{Crude Testicle Humor}), and the hyperbolic violence-as-praise of \emph{In-Game Violence Humor} ($8.73\%$), the second-largest topic overall.
+
+The categories that carry genuine directed toxicity are present but comparatively small. \emph{Sexual content} spans four topics ($8.9\%$), consistently crude and centred on the sexualisation of female characters. \emph{Identity hate} surfaces as two distinct topics ($3.1\%$), both built on the pejorative use of ``gay'' and related terms (\emph{Casual Homophobic Language}, \emph{Homophobic Remarks}); homophobia is thus the only form of targeted identity-based hostility that the English corpus surfaces as its own coherent theme. \emph{Nationality-based xenophobia} accounts for a further $3.2\%$ across two topics with clearly distinct targets: hostility toward Russian players, blamed for cheating and disruption (\emph{Anti-Russian Hostility}, $2.06\%$), and a broader cluster centred on China, Chinese players, and grievances over regional versions and translations (\emph{Nationality Based Hostility}, $1.14\%$).
+
+\subsection{Portuguese Corpus}
+\label{subsec:semantic-pt}
+
+The Portuguese model tilts markedly further toward the non-hostile registers. \emph{Humour and sarcasm} is by far its most populated category, accounting for eight of the fifteen topics and $33.2\%$ of documents---nearly double the English proportion---while \emph{product complaint}, although still the single heaviest category at $38.1\%$, is carried by only two topics, one of them the dominant catch-all cluster. This concentration reflects a distinctive feature of Brazilian Portuguese review discourse in which profanity operates overwhelmingly as an affective intensifier rather than as an attack: \emph{Profane Praise} captures enthusiastic recommendations phrased through vulgarity (the vulgar equivalents of ``damn good''), \emph{Brazilian Joke Reviews} is unified simply by the ``kkkk'' laughter marker, and \emph{Profane Friend Recommendations} gathers reviews that affectionately insult the friends one plays with while still recommending the game. Several further topics---\emph{Demon Slaying Hyperbole}, \emph{Vulgar Shooter Commentary} (built on the memetic phrase \emph{tiro, porrada e bomba}), and \emph{Nazi Killing Gameplay}---were flagged purely for violent gameplay vocabulary and were likewise labelled as humour, echoing the English \texttt{other} cluster.
+
+The genuinely targeted categories are correspondingly thin. \emph{Identity hate} appears as no topic at all in Portuguese, in contrast to the two homophobia topics in English, and \emph{nationality-based xenophobia} is confined to a single cluster (\emph{Lusophone Nationality Toxicity}, $1.9\%$) whose targets are regional rather than geopolitical: Argentinians above all, but also Spanish speakers and Northeastern Brazilians. A single \emph{sexual content} topic ($4.9\%$) and two \emph{generic insult} clusters---one of indiscriminate profanity, one of incoherent copy-paste rants and death-wishes (\emph{Incoherent Profane Rants})---round out the model.
+
+\subsection{Cross-Linguistic Comparison and Limitations}
+\label{subsec:semantic-cross}
+
+Read side by side, the two models agree on the essential finding and differ in emphasis. Both are dominated by profane product criticism and non-hostile humour, both reserve only a small residual for directed hostility, and neither surfaces any topic the model was willing to call a genuine threat. The differences are of degree and target: the English corpus distributes its hostility across homophobia and two geopolitical xenophobia targets (Russia, China), whereas the Portuguese corpus surfaces no identity-hate topic and localises its xenophobia regionally, while leaning far more heavily on humour and expressive profanity. Whether this reflects a genuine cultural difference in how toxicity is expressed, or an artefact of the much smaller Portuguese corpus yielding coarser clusters, cannot be settled from the topic structure alone; the lower semantic coherence of the Portuguese model already reported in Section~\ref{sec:semantic-method} is consistent with the corpus-size explanation and counsels caution.
+
+Two limitations qualify these results. First, the category assignments are the product of an LLM reading a fixed sample of fifteen reviews per topic, and the taxonomy boundaries are inherently fuzzy: the split of gameplay-violence topics between \texttt{other} and \texttt{humor\_sarcasm}, for instance, reflects a judgement call more than a sharp distinction, and the labels should be read as an interpretive summary rather than a ground-truth annotation. Second, roughly $4\%$ of each corpus was set aside as unclustered noise and excluded from this analysis; the outlier keywords (English: \emph{hate}, \emph{terrorist}, \emph{russia}; Portuguese: \emph{odeio}, \emph{fodamuito}) suggest that some of the most extreme material resists clustering precisely because it is idiosyncratic rather than thematic, and is therefore under-represented in the topic-level view above.
+
+
+% =====================================================================
+%  CORRECTED Portuguese longtable — matches
+%  steam-data/step03-output/pt/results/topic_labels.csv (canonical run).
+%  Use this in place of the previous \subsection{Portuguese Corpus} table.
+% =====================================================================
+{\tiny
+\rowcolors{2}{gray!10}{white}
+\begin{longtable}{p{0.9cm}p{0.6cm}p{3cm}lp{6.1cm}}
+    \caption{All Portuguese topics, ordered by document count, with LLM-assigned label, category, and description.} \label{tab:semantic-topics-pt} \\
+    \toprule
+    \textbf{Docs.} & \textbf{\%} & \textbf{Label} & \textbf{Category} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \multicolumn{5}{c}{\tablename\ \thetable{} -- continued from previous page} \\
+    \toprule
+    \textbf{Docs.} & \textbf{\%} & \textbf{Label} & \textbf{Category} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \midrule
+    \multicolumn{5}{r}{Continued on next page} \\
+    \endfoot
+    \bottomrule
+    \endlastfoot
+    10{,}346 & 30.71 & Profane Game Opinions & \texttt{product\_\allowbreak complaint} & A broad catch-all cluster of Brazilian Portuguese reviews expressing opinions about game quality---both harshly negative (calling games ``trash'' or ``garbage'') and enthusiastically positive---unified only by heavy profanity and crude sexual expressions rather than a coherent toxic theme. \\
+    2{,}491 & 7.39 & Profane Game Bashing & \texttt{product\_\allowbreak complaint} & Reviews denouncing games as worthless trash (``lixo'', ``porcaria'') and a waste of money, urging others not to buy while venting with heavy profanity about poor optimization, bad servers, hackers, and unresponsive developers. \\
+    2{,}396 & 7.11 & Crude Sexual Humor & \texttt{humor\_\allowbreak sarcasm} & Reviews using vulgar sexual and scatological slang in a joking, meme-like register to express (often positive) opinions about games, rather than to attack anyone. \\
+    2{,}295 & 6.81 & Vulgar Portuguese Profanity & \texttt{generic\_\allowbreak insult} & Reviews united by heavy use of generic profanity and crude slang (e.g., ``caralho'', ``pau'', ``toma no c'') applied indiscriminately to both praise and complaints about games, rather than any coherent targeted theme. \\
+    2{,}251 & 6.68 & Profane Praise & \texttt{humor\_\allowbreak sarcasm} & Enthusiastic positive reviews that recommend games using heavy profanity as intensifiers (e.g., vulgar equivalents of ``damn good''), occasionally mixed with crude sexual jokes and a stray homophobic slur, flagged as toxic due to swearing rather than hostile intent. \\
+    2{,}081 & 6.18 & Gameplay Killing Descriptions & \texttt{other} & Reviews describing in-game violence, killing enemies, and repeatedly dying as part of normal gameplay, using violent vocabulary (matar, morrer) that triggered the toxicity classifier despite mostly expressing enjoyment or frustration with game mechanics rather than real-world threats. \\
+    1{,}695 & 5.03 & In-Game Killing Banter & \texttt{humor\_\allowbreak sarcasm} & Reviews using violent vocabulary (kill, die, exterminate) to hyperbolically describe gameplay experiences---killing enemies, dying repeatedly, or jokingly threatening developers and players---likely flagged as toxic despite being gaming banter rather than genuine threats. \\
+    1{,}662 & 4.93 & Crude Sexual Commentary & \texttt{sexual\_\allowbreak content} & Reviews united by explicit sexual content, including crude jokes about sex in games, demands for sexual or pornographic content, graphic descriptions of sex acts and genitalia, and repetitive spam of the word ``sexo''. \\
+    1{,}563 & 4.64 & Incoherent Profane Rants & \texttt{generic\_\allowbreak insult} & A thematically incoherent cluster of profanity-laden outbursts, repeated-phrase spam, memetic slang, and scattered insults or death wishes with no unifying target or narrative. \\
+    1{,}425 & 4.23 & Unclustered / Outliers & \texttt{other} & Documents that did not fit clearly into any topic cluster. \\
+    1{,}206 & 3.58 & Demon Slaying Hyperbole & \texttt{humor\_\allowbreak sarcasm} & Enthusiastic, profanity-laden reviews praising games with demonic or supernatural themes (e.g., beating up the devil, killing demons, vampires), where crude and violent language expresses excitement and dark humor rather than genuine hostility. \\
+    1{,}082 & 3.21 & Vulgar Shooter Commentary & \texttt{humor\_\allowbreak sarcasm} & Profanity-laden reviews of shooter and action games, united by the memetic phrase ``tiro, porrada e bomba'' (shooting, brawling and bombs), mixing crude enthusiasm for combat with vulgar complaints about gunplay, hit registration, and difficulty. \\
+    1{,}034 & 3.07 & Brazilian Joke Reviews & \texttt{humor\_\allowbreak sarcasm} & Reviews united by the ``kkkk'' laughter marker, using casual profanity and crude humor to jokingly praise or mock games rather than express targeted hostility. \\
+    847 & 2.51 & Profane Friend Recommendations & \texttt{humor\_\allowbreak sarcasm} & Mostly positive, humorous reviews recommending games to play with friends, flagged as toxic due to heavy profanity and playful insults directed at friends (e.g., calling them idiots or cowards) rather than genuine hostility. \\
+    669 & 1.99 & Nazi Killing Gameplay & \texttt{humor\_\allowbreak sarcasm} & Mostly positive reviews (likely for WWII shooters) flagged for violent language, as users enthusiastically praise the games as simulators for killing Nazis, Germans, communists, or zombies, often with profanity and political banter about fascists and capitalists. \\
+    642 & 1.91 & Lusophone Nationality Toxicity & \texttt{nationality\_\allowbreak xenophobia} & Reviews mixing profanity-laden game complaints with derogatory or xenophobic remarks targeting nationalities and regional groups, notably Argentinians, Spanish speakers, and Northeastern Brazilians. \\
+\end{longtable}
+}

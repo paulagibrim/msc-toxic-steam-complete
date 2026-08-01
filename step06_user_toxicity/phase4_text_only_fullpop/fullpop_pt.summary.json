@@ -1,0 +1,10 @@
+{
+  "population": "pt",
+  "model_name": "paraphrase-multilingual-MiniLM-L12-v2",
+  "device": "cuda",
+  "n_eligible": 490470,
+  "n_positive": 160,
+  "n_reused_from_existing": 0,
+  "n_encoded_fresh": 490470,
+  "n_without_embedding": 0
+}

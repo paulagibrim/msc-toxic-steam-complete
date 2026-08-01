@@ -1,0 +1,14 @@
+{
+  "population": "pt",
+  "model": "logreg",
+  "n_eligible": 490470,
+  "n_positive_total": 160,
+  "n_outer_folds_run": 160,
+  "n_train_negatives": 392248,
+  "n_test_negatives": 98062,
+  "auc_pr": 0.00784,
+  "validation_mode": false,
+  "leave_toxic_out_control": false,
+  "text_only_ablation": true,
+  "n_features": 50
+}

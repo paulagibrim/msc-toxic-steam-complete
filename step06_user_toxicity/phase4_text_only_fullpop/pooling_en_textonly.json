@@ -1,0 +1,130 @@
+{
+  "language": "en",
+  "with_metadata": false,
+  "xgboost_installed": false,
+  "topk": 3,
+  "conditions": {
+    "circular": {
+      "n_users": 2191286,
+      "n_positive": 1225,
+      "seconds": 6298,
+      "results": {
+        "mean": {
+          "logreg": {
+            "roc_auc": 0.9081,
+            "auc_pr": 0.00496
+          },
+          "svm_linear": {
+            "roc_auc": 0.9079,
+            "auc_pr": 0.00483
+          },
+          "svm_rbf": {
+            "roc_auc": 0.9712,
+            "auc_pr": 0.04778
+          },
+          "xgboost": {
+            "roc_auc": 0.9649,
+            "auc_pr": 0.03789
+          }
+        },
+        "mean+max": {
+          "logreg": {
+            "roc_auc": 0.9569,
+            "auc_pr": 0.03077
+          },
+          "svm_linear": {
+            "roc_auc": 0.9538,
+            "auc_pr": 0.02934
+          },
+          "svm_rbf": {
+            "roc_auc": 0.9764,
+            "auc_pr": 0.05244
+          },
+          "xgboost": {
+            "roc_auc": 0.9695,
+            "auc_pr": 0.0482
+          }
+        },
+        "mean+max+topk": {
+          "logreg": {
+            "roc_auc": 0.9432,
+            "auc_pr": 0.03097
+          },
+          "svm_linear": {
+            "roc_auc": 0.926,
+            "auc_pr": 0.02624
+          },
+          "svm_rbf": {
+            "roc_auc": 0.9765,
+            "auc_pr": 0.05701
+          },
+          "xgboost": {
+            "roc_auc": 0.9695,
+            "auc_pr": 0.04386
+          }
+        }
+      }
+    },
+    "leave_toxic_out": {
+      "n_users": 2190923,
+      "n_positive": 862,
+      "seconds": 7333,
+      "results": {
+        "mean": {
+          "logreg": {
+            "roc_auc": 0.6657,
+            "auc_pr": 0.00067
+          },
+          "svm_linear": {
+            "roc_auc": 0.6673,
+            "auc_pr": 0.00068
+          },
+          "svm_rbf": {
+            "roc_auc": 0.7722,
+            "auc_pr": 0.00298
+          },
+          "xgboost": {
+            "roc_auc": 0.7622,
+            "auc_pr": 0.00276
+          }
+        },
+        "mean+max": {
+          "logreg": {
+            "roc_auc": 0.7019,
+            "auc_pr": 0.00137
+          },
+          "svm_linear": {
+            "roc_auc": 0.7074,
+            "auc_pr": 0.0014
+          },
+          "svm_rbf": {
+            "roc_auc": 0.7863,
+            "auc_pr": 0.00414
+          },
+          "xgboost": {
+            "roc_auc": 0.7671,
+            "auc_pr": 0.0031
+          }
+        },
+        "mean+max+topk": {
+          "logreg": {
+            "roc_auc": 0.6475,
+            "auc_pr": 0.00131
+          },
+          "svm_linear": {
+            "roc_auc": 0.6135,
+            "auc_pr": 0.00125
+          },
+          "svm_rbf": {
+            "roc_auc": 0.7872,
+            "auc_pr": 0.00438
+          },
+          "xgboost": {
+            "roc_auc": 0.7706,
+            "auc_pr": 0.00345
+          }
+        }
+      }
+    }
+  }
+}

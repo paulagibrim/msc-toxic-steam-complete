@@ -3,3 +3,14 @@
 __pycache__/
 
 visualizations/
+
+# SLURM job logs (regenerated on every cluster run; some .err files reach ~78MB)
+*.err
+*.out
+
+# Run artifacts / intermediate data - these live in ../steam-data, not in the repo
+*.parquet
+*.npy
+
+# Manual backup copies of chapter drafts
+* - cópia.*
