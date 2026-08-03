@@ -140,6 +140,12 @@ def parse_args():
         help="VALIDATION ONLY: cap the number of users used (stratified), instead of the full population",
     )
     parser.add_argument(
+        "--pooling", choices=["mean", "mean+max"], default="mean",
+        help="Per-user pooling of review [CLS] vectors (default mean, unchanged from the original architecture). "
+        "mean+max concatenates a per-user max-pool alongside the mean-pool before the classifier head - "
+        "the pooling strategy Linha C's frozen-encoder ablation found captured most of mean's-alone shortfall.",
+    )
+    parser.add_argument(
         "--fold", type=int, default=None,
         help="Run ONLY this fold index (0-based) and write its predictions to "
         "<output_stem>.fold<N>.parquet, so folds can be parallelised across GPUs/jobs "
@@ -335,37 +341,60 @@ class MILToxicityClassifier(nn.Module):
     + a linear classification head. See module docstring for the full
     architecture rationale."""
 
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: str, pooling: str = "mean"):
         super().__init__()
+        assert pooling in ("mean", "mean+max"), pooling
+        self.pooling = pooling
         self.encoder = AutoModel.from_pretrained(model_name)
         hidden_size = self.encoder.config.hidden_size
-        self.classifier = nn.Linear(hidden_size, 1)
+        classifier_in = hidden_size * 2 if pooling == "mean+max" else hidden_size
+        self.classifier = nn.Linear(classifier_in, 1)
 
     def forward(self, input_ids, attention_mask, user_index, n_users, review_valid=None):
         outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
-        review_vectors = outputs.last_hidden_state[:, 0, :]  # [CLS] token per review
+        review_vectors = outputs.last_hidden_state[:, 0, :]  # [CLS] token per review, UNMODIFIED (max-pool below needs the raw values, not zeroed padding)
 
         hidden_size = review_vectors.shape[1]
         device = review_vectors.device
 
         if review_valid is not None:
+            valid_per_review = review_valid
             # Padding rows (from make_collate_fn's fixed_reviews_per_user)
             # still get a forward pass - DistilBERT has no notion of "this
             # whole review doesn't exist" - but must NOT contribute to the
-            # pooled average. Zeroing them here and excluding them from the
-            # per-user count makes the result IDENTICAL to pooling only the
-            # real reviews (mean pooling is just a sum/count; padding rows
-            # contribute 0/0 to both), not an approximation.
-            review_vectors = review_vectors * review_valid.unsqueeze(1)
-            valid_per_review = review_valid
+            # pooled average. Zeroing them here (in a copy used only for the
+            # mean) and excluding them from the per-user count makes the
+            # result IDENTICAL to pooling only the real reviews (mean
+            # pooling is just a sum/count; padding rows contribute 0/0 to
+            # both), not an approximation.
+            mean_input = review_vectors * review_valid.unsqueeze(1)
         else:
             valid_per_review = torch.ones(review_vectors.shape[0], device=device)
+            mean_input = review_vectors
 
         sums = torch.zeros(n_users, hidden_size, device=device)
-        sums.index_add_(0, user_index, review_vectors)
+        sums.index_add_(0, user_index, mean_input)
         counts = torch.zeros(n_users, device=device)
         counts.index_add_(0, user_index, valid_per_review)
-        pooled = sums / counts.unsqueeze(1).clamp(min=1)
+        mean_pooled = sums / counts.unsqueeze(1).clamp(min=1)
+
+        if self.pooling == "mean+max":
+            # Padding rows must be EXCLUDED from the max, not zeroed like the
+            # mean - a real [CLS] vector can have negative components, so a
+            # zeroed padding row could wrongly win the max. -inf guarantees
+            # it never does; index_reduce_(..., "amax") is the scatter-max
+            # equivalent of the sum-based index_add_ used for the mean above.
+            max_input = (review_vectors.masked_fill(review_valid.unsqueeze(1) == 0, float("-inf"))
+                         if review_valid is not None else review_vectors)
+            maxes = torch.full((n_users, hidden_size), float("-inf"), device=device)
+            maxes.index_reduce_(0, user_index, max_input, "amax", include_self=False)
+            # A user with zero valid reviews in this batch (shouldn't happen -
+            # every bag has >=1 review by construction) would otherwise leave
+            # -inf in the pooled vector and poison the classifier's linear layer.
+            maxes = torch.where(torch.isinf(maxes), torch.zeros_like(maxes), maxes)
+            pooled = torch.cat([mean_pooled, maxes], dim=1)
+        else:
+            pooled = mean_pooled
 
         logits = self.classifier(pooled).squeeze(-1)
         return logits
@@ -403,6 +432,7 @@ def evaluate_bags(model, bags: list, tokenizer, device) -> np.ndarray:
     with torch.no_grad():
         for texts in tqdm(bags, desc="  evaluating", unit="user", smoothing=0):
             vector_sum = None
+            vector_max = None
             for chunk_start in range(0, len(texts), EVAL_CHUNK_SIZE):
                 chunk = texts[chunk_start : chunk_start + EVAL_CHUNK_SIZE]
                 encoded = tokenizer(
@@ -415,8 +445,15 @@ def evaluate_bags(model, bags: list, tokenizer, device) -> np.ndarray:
                 chunk_vectors = outputs.last_hidden_state[:, 0, :]  # [CLS] per review in this chunk
                 chunk_sum = chunk_vectors.sum(dim=0)
                 vector_sum = chunk_sum if vector_sum is None else vector_sum + chunk_sum
+                if model.pooling == "mean+max":
+                    # max is associative across chunks just like sum is, so
+                    # accumulating a running elementwise max here is exactly
+                    # equivalent to maxing over every review at once.
+                    chunk_max = chunk_vectors.max(dim=0).values
+                    vector_max = chunk_max if vector_max is None else torch.maximum(vector_max, chunk_max)
 
-            pooled = (vector_sum / len(texts)).unsqueeze(0)
+            mean_pooled = (vector_sum / len(texts)).unsqueeze(0)
+            pooled = torch.cat([mean_pooled, vector_max.unsqueeze(0)], dim=1) if model.pooling == "mean+max" else mean_pooled
             logits = model.classifier(pooled).squeeze(-1)
             predictions.append(torch.sigmoid(logits).item())
 
@@ -430,6 +467,7 @@ def save_inprogress_checkpoint(
         {
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
+            "pooling": model.pooling,
             "epoch": epoch,
             "batches_done": batches_done,
             # Recorded so a resumed run can detect a hyperparameter change
@@ -451,7 +489,7 @@ def save_inprogress_checkpoint(
 def train_one_fold(
     train_bags, train_y, test_bags, test_y, tokenizer, device,
     epochs, batch_size, learning_rate, max_reviews_per_user_train,
-    fold_checkpoint_path: Path = None, fold_seed: int = 0,
+    fold_checkpoint_path: Path = None, fold_seed: int = 0, pooling: str = "mean",
 ) -> np.ndarray:
     """Trains a fresh MILToxicityClassifier on this fold's training bags,
     returns predicted probabilities for the test bags (evaluated with
@@ -465,7 +503,7 @@ def train_one_fold(
     everything trained in that fold so far. fold_seed fixes the
     DataLoader's shuffle order so a resumed run can deterministically skip
     the batches already completed in the epoch it was interrupted during."""
-    model = MILToxicityClassifier(MODEL_NAME).to(device)
+    model = MILToxicityClassifier(MODEL_NAME, pooling=pooling).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
     start_epoch = 0
@@ -474,11 +512,12 @@ def train_one_fold(
         ckpt = torch.load(fold_checkpoint_path, map_location=device)
         ckpt_batch_size = ckpt.get("batch_size")
         ckpt_max_reviews = ckpt.get("max_reviews_per_user_train")
-        if ckpt_batch_size != batch_size or ckpt_max_reviews != max_reviews_per_user_train:
+        ckpt_pooling = ckpt.get("pooling", "mean")  # absent in checkpoints saved before --pooling existed
+        if ckpt_batch_size != batch_size or ckpt_max_reviews != max_reviews_per_user_train or ckpt_pooling != pooling:
             info(
                 f"  [checkpoint] IGNORING stale in-progress checkpoint - saved with "
-                f"batch_size={ckpt_batch_size}, max_reviews_per_user_train={ckpt_max_reviews}, "
-                f"current run uses batch_size={batch_size}, max_reviews_per_user_train={max_reviews_per_user_train}. "
+                f"batch_size={ckpt_batch_size}, max_reviews_per_user_train={ckpt_max_reviews}, pooling={ckpt_pooling}, "
+                f"current run uses batch_size={batch_size}, max_reviews_per_user_train={max_reviews_per_user_train}, pooling={pooling}. "
                 f"'batch N' means a different amount of progress under different settings - restarting this fold from scratch."
             )
         else:
@@ -626,7 +665,7 @@ def run_single_fold(args, bags, y, user_urls, tokenizer, device):
     predictions = train_one_fold(
         train_bags, train_y, test_bags, test_y, tokenizer, device,
         args.epochs, args.batch_size, args.learning_rate, args.max_reviews_per_user_train,
-        fold_checkpoint_path=fold_checkpoint_path, fold_seed=RANDOM_STATE + fold_idx,
+        fold_checkpoint_path=fold_checkpoint_path, fold_seed=RANDOM_STATE + fold_idx, pooling=args.pooling,
     )
     fold_checkpoint_path.unlink(missing_ok=True)  # fold finished - drop the in-progress checkpoint
 
@@ -696,6 +735,7 @@ def main():
         "learning_rate": args.learning_rate,
         "max_reviews_per_user_train": args.max_reviews_per_user_train,
         "limit_users": args.limit_users,
+        "pooling": args.pooling,
     }
 
     completed_folds = {}
@@ -737,7 +777,7 @@ def main():
         predictions = train_one_fold(
             train_bags, train_y, test_bags, test_y, tokenizer, device,
             args.epochs, args.batch_size, args.learning_rate, args.max_reviews_per_user_train,
-            fold_checkpoint_path=fold_checkpoint_path, fold_seed=RANDOM_STATE + fold_idx,
+            fold_checkpoint_path=fold_checkpoint_path, fold_seed=RANDOM_STATE + fold_idx, pooling=args.pooling,
         )
         fold_checkpoint_path.unlink(missing_ok=True)  # fold finished - the in-progress checkpoint is no longer needed
 
@@ -776,6 +816,7 @@ def main():
             "auc_pr": round(float(auc_pr), 6),
             "leave_toxic_out_control": args.leave_toxic_out,
             "validation_mode": args.limit_users is not None,
+            "pooling": args.pooling,
         },
         args.output.with_suffix(".summary.json"),
     )
