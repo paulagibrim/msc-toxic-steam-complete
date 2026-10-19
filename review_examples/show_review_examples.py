@@ -55,7 +55,7 @@ BOILERPLATE_PATTERNS = [
 OUTPUT_COLUMNS = [
     "game_id", "game_name", "review_url", "user_url", "review_date", "is_recommended",
     "hours_played", "review_text", "review_text_clean", "review_lang", "detection_confidence",
-    "perspective_score", "detoxify_score", "sentiment_score", "is_toxic_user", "topic",
+    "perspective_score", "detoxify_score", "sentiment_score", "topic",
 ]
 
 
@@ -95,21 +95,10 @@ def load_scored_reviews(step02_dir: Path, lang: str, chunk_filter_fn=None) -> pd
     is_subfolder = source != step02_dir
 
     files = list_parquet_files(source)
-    has_sentiment = False
-    if files:
-        try:
-            import pyarrow.parquet as pq
-            schema_names = pq.read_schema(files[0]).names
-            has_sentiment = "sentiment_score" in schema_names
-        except Exception:
-            pass
-
     columns = [
         "review_url", "review_text", "game_id", "perspective_score", "detoxify_score",
         "user_url", "review_date", "is_recommended", "hours_played", "detection_confidence",
     ]
-    if has_sentiment:
-        columns.append("sentiment_score")
     if not is_subfolder:
         columns += ["review_lang"]
     columns += ["perspective_declared_language"]
@@ -162,20 +151,23 @@ def filter_reviews(
     games: pd.DataFrame,
     toxic: bool = None,
     venn_set: str = None,
-    user_toxic: bool = None,
-    min_sentiment: float = None,
-    max_sentiment: float = None,
-    is_recommended: bool = None,
     contains: str = None,
     game_tag: str = None,
 ) -> pd.DataFrame:
     """Applies toxicity labeling (same union rule/thresholds/invalid-score
-    exclusion as elsewhere in this project), then optional user/sentiment/text/tag
-    filters. Returns the filtered rows, NOT yet sampled."""
-    if toxic is not None and venn_set is not None:
-        raise ValueError("Cannot give both `toxic` and `venn_set`")
-    if toxic is None and venn_set is None and user_toxic is None:
-        raise ValueError("At least one of `toxic`, `venn_set`, or `user_toxic` must be given")
+    exclusion as elsewhere in this project), then the optional text/tag
+    filters. Returns the filtered rows, NOT yet sampled.
+
+    Exactly one of `toxic` (binary toxic/non-toxic) or `venn_set`
+    ('perspective_only' | 'detoxify_only' | 'both' - the same three
+    mutually-exclusive Venn regions used in run_toxicity_venn.py and
+    step05's tfidf_venn_set_analysis.py) must be given - venn_set exists
+    specifically to pull qualitative examples for a TF-IDF finding (e.g.
+    "detoxify_only reviews look neutral by term frequency - are they
+    actually toxic in context, or genuinely mislabeled?") that term-level
+    statistics alone can't answer."""
+    if (toxic is None) == (venn_set is None):
+        raise ValueError("Exactly one of `toxic` or `venn_set` must be given")
 
     perspective_valid = df["perspective_score"].between(0, 1)
     detoxify_valid = df["detoxify_score"].between(0, 1)
@@ -192,27 +184,9 @@ def filter_reviews(
         if venn_set not in region_mask:
             raise ValueError(f"venn_set must be one of {list(region_mask)}, got {venn_set!r}")
         df = df[region_mask[venn_set]]
-    elif toxic is not None:
+    else:
         is_toxic = (df["perspective_score"] >= PERSPECTIVE_THRESHOLD) | (df["detoxify_score"] >= DETOXIFY_THRESHOLD)
         df = df[is_toxic] if toxic else df[~is_toxic]
-
-    if user_toxic is not None:
-        if "is_toxic_user" not in df.columns:
-            raise ValueError("df must contain 'is_toxic_user' column when filtering by user_toxic")
-        df = df[(df["is_toxic_user"] == user_toxic).fillna(False)]
-
-    if min_sentiment is not None:
-        if "sentiment_score" not in df.columns:
-            raise ValueError("df must contain 'sentiment_score' column when filtering by min_sentiment")
-        df = df[(df["sentiment_score"] >= min_sentiment).fillna(False)]
-
-    if max_sentiment is not None:
-        if "sentiment_score" not in df.columns:
-            raise ValueError("df must contain 'sentiment_score' column when filtering by max_sentiment")
-        df = df[(df["sentiment_score"] <= max_sentiment).fillna(False)]
-
-    if is_recommended is not None:
-        df = df[(df["is_recommended"] == is_recommended).fillna(False)]
 
     if contains:
         df = df[df["review_text"].str.contains(contains, case=False, na=False, regex=False)]
@@ -245,8 +219,6 @@ def attach_sentiment(df: pd.DataFrame, step04_dir: Path, lang: str) -> pd.DataFr
     function's contract, this data may not be available yet.
 
     Handles both the subfolder and flat layouts - see _resolve_lang_source."""
-    if "sentiment_score" in df.columns:
-        return df
     if not step04_dir or not step04_dir.exists():
         info(f"No step04 output found for [{lang}] - sentiment_score will be empty")
         df["sentiment_score"] = pd.NA
@@ -282,21 +254,6 @@ def attach_topics(df: pd.DataFrame, step03_results_path: Path) -> pd.DataFrame:
     return df.merge(topics, on="review_url", how="left")
 
 
-def attach_user_labels(df: pd.DataFrame, user_labels_path: Path, lang: str) -> pd.DataFrame:
-    """Left-joins is_toxic_{lang} from toxic_user_labels.parquet as is_toxic_user."""
-    if "is_toxic_user" in df.columns:
-        return df
-    if not user_labels_path or not Path(user_labels_path).exists():
-        info(f"No user_labels file found at {user_labels_path} - is_toxic_user will be empty")
-        df["is_toxic_user"] = pd.NA
-        return df
-
-    col = f"is_toxic_{lang}"
-    labels = pd.read_parquet(user_labels_path, columns=["user_url", col])
-    labels = labels.rename(columns={col: "is_toxic_user"})
-    return df.merge(labels, on="user_url", how="left")
-
-
 def get_review_examples(
     lang: str,
     n: int,
@@ -304,17 +261,12 @@ def get_review_examples(
     step02_dir: Path,
     toxic: bool = None,
     venn_set: str = None,
-    user_toxic: bool = None,
-    min_sentiment: float = None,
-    max_sentiment: float = None,
-    is_recommended: bool = None,
-    user_labels_path: Path = None,
     step04_dir: Path = None,
     step03_results_path: Path = None,
     contains: str = None,
     game_tag: str = None,
     seed: int = None,
-    light_mode: bool = True,
+    light_mode: bool = False,
 ) -> pd.DataFrame:
     """Main entry point - see module docstring for what's pulled from where.
 
@@ -341,55 +293,20 @@ def get_review_examples(
     """
     games = load_games(games_path)
 
-    user_labels_df = None
-    if user_toxic is not None or "is_toxic_user" in OUTPUT_COLUMNS:
-        if user_labels_path and Path(user_labels_path).exists():
-            col = f"is_toxic_{lang}"
-            user_labels_df = pd.read_parquet(user_labels_path, columns=["user_url", col])
-            user_labels_df = user_labels_df.rename(columns={col: "is_toxic_user"})
-
     if light_mode:
         def filter_chunk(chunk_df):
-            if user_labels_df is not None and "is_toxic_user" not in chunk_df.columns:
-                chunk_df = chunk_df.merge(user_labels_df, on="user_url", how="left")
-            if min_sentiment is not None or max_sentiment is not None:
-                chunk_df = attach_sentiment(chunk_df, step04_dir, lang)
-            return filter_reviews(
-                chunk_df, games, toxic=toxic, venn_set=venn_set, user_toxic=user_toxic,
-                min_sentiment=min_sentiment, max_sentiment=max_sentiment,
-                is_recommended=is_recommended, contains=contains, game_tag=game_tag
-            )
+            return filter_reviews(chunk_df, games, toxic=toxic, venn_set=venn_set, contains=contains, game_tag=game_tag)
         filtered = load_scored_reviews(step02_dir, lang, chunk_filter_fn=filter_chunk)
     else:
         reviews = load_scored_reviews(step02_dir, lang)
-        if user_toxic is not None:
-            reviews = attach_user_labels(reviews, user_labels_path, lang)
-        if min_sentiment is not None or max_sentiment is not None:
-            reviews = attach_sentiment(reviews, step04_dir, lang)
-        filtered = filter_reviews(
-            reviews, games, toxic=toxic, venn_set=venn_set, user_toxic=user_toxic,
-            min_sentiment=min_sentiment, max_sentiment=max_sentiment,
-            is_recommended=is_recommended, contains=contains, game_tag=game_tag
-        )
+        filtered = filter_reviews(reviews, games, toxic=toxic, venn_set=venn_set, contains=contains, game_tag=game_tag)
         
-    selector_parts = []
-    if venn_set is not None:
-        selector_parts.append(f"venn_set={venn_set}")
-    elif toxic is not None:
-        selector_parts.append(f"toxic={toxic}")
-    if user_toxic is not None:
-        selector_parts.append(f"user_toxic={user_toxic}")
-    if min_sentiment is not None or max_sentiment is not None:
-        selector_parts.append(f"sentiment=[{min_sentiment},{max_sentiment}]")
-    if is_recommended is not None:
-        selector_parts.append(f"rec={is_recommended}")
-    selector = ", ".join(selector_parts)
+    selector = f"venn_set={venn_set}" if venn_set is not None else f"toxic={toxic}"
     info(f"[{lang}] {len(filtered)} review(s) match ({selector}, contains={contains!r}, game_tag={game_tag!r})")
 
     sample = sample_reviews(filtered, n=n, seed=seed)
     sample["review_text_clean"] = sample["review_text"].apply(clean_review_text)
     sample = attach_game_names(sample, games)
-    sample = attach_user_labels(sample, user_labels_path, lang)
     sample = attach_sentiment(sample, step04_dir, lang)
     sample = attach_topics(sample, step03_results_path)
 

@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
-from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.metrics import average_precision_score
 
 
 def main():
@@ -53,15 +53,7 @@ def main():
 
     n_folds = oof["fold"].nunique()
     auc_pr = average_precision_score(oof["y_true"], oof["y_score"])
-    # ROC-AUC alongside AUC-PR: at these prevalences AUC-PR alone is not
-    # comparable against the frozen-encoder tables, which report ROC-AUC as
-    # the prevalence-independent headline. Both are computed over the
-    # concatenated OOF, never averaged across folds.
-    roc_auc = roc_auc_score(oof["y_true"], oof["y_score"])
-    prevalence = float(oof["y_true"].mean())
-    print(f"\n[{args.population}] out-of-fold ({n_folds}-fold): ROC-AUC {roc_auc:.4f}  |  "
-          f"AUC-PR {auc_pr:.5f} (prevalence {prevalence:.6f}, lift {auc_pr / prevalence:.2f}x)  |  "
-          f"{len(oof):,} users, {int(oof['y_true'].sum()):,} positive")
+    print(f"\n[{args.population}] AUC-PR (out-of-fold, {n_folds}-fold): {auc_pr:.4f}  |  {len(oof):,} users, {int(oof['y_true'].sum()):,} positive")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     oof.to_parquet(args.output, index=False)
@@ -73,9 +65,6 @@ def main():
         "n_positive": int(oof["y_true"].sum()),
         "n_folds": int(n_folds),
         "auc_pr": round(float(auc_pr), 6),
-        "roc_auc": round(float(roc_auc), 6),
-        "prevalence": round(prevalence, 8),
-        "lift": round(float(auc_pr) / prevalence, 4),
         "merged_from": [str(f) for f in files],
     }
     summary_path = args.output.with_suffix(".summary.json")

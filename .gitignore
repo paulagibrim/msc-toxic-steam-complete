@@ -1,5 +1,11 @@
 .DS_Store
 .idea
 __pycache__/
-
-visualizations/
+*.err
+*.tex
+*.slurm
+*.out
+*.parquet
+*.bib
+*.png
+*.pdf

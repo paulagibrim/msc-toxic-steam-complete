@@ -35,16 +35,11 @@ GAMES_PATH = Path("../../steam-data/step01-output/games/games.parquet")
 
 
 def _default_paths(lang: str) -> dict:
-    step04_v2 = Path(f"../../steam-data/step04-output-v2/review_lang={lang}")
-    step04_default = step04_v2 if step04_v2.exists() else Path(f"../../steam-data/step04-output/review_lang={lang}")
-    if not step04_default.exists() and Path("../../steam-data/step04-output").exists():
-        step04_default = Path("../../steam-data/step04-output")
     return {
         "games": GAMES_PATH,
-        "step02_dir": step04_default,
-        "step04_dir": step04_default,
+        "step02_dir": Path(f"../../steam-data/step02-output/review_lang={lang}"),
+        "step04_dir": Path(f"../../steam-data/step04-output-v2/review_lang={lang}"),
         "step03_results": Path(f"../../steam-data/step03-output/{lang}/results/classified_toxic.parquet"),
-        "user_labels": Path("../../steam-data/step06-output/phase1_feature_engineering/pipeline/toxic_user_labels.parquet"),
     }
 
 
@@ -53,7 +48,7 @@ def parse_args():
         description="Samples example reviews (language + toxicity + optional term/tag filters) for manual inspection."
     )
     parser.add_argument("--lang", required=True, help="Language code, e.g. 'pt' or 'en'")
-    toxic_group = parser.add_mutually_exclusive_group(required=False)
+    toxic_group = parser.add_mutually_exclusive_group(required=True)
     toxic_group.add_argument("--toxic", dest="toxic", action="store_true", default=None, help="Sample toxic reviews")
     toxic_group.add_argument("--non-toxic", dest="toxic", action="store_false", help="Sample non-toxic reviews")
     toxic_group.add_argument(
@@ -61,9 +56,6 @@ def parse_args():
         help="Sample from one of the three mutually-exclusive Venn regions instead of toxic/non-toxic "
         "(same regions as run_toxicity_venn.py / tfidf_venn_set_analysis.py)",
     )
-    user_toxic_group = parser.add_mutually_exclusive_group(required=False)
-    user_toxic_group.add_argument("--user-toxic", dest="user_toxic", action="store_true", default=None, help="Filter for toxic users")
-    user_toxic_group.add_argument("--user-non-toxic", dest="user_toxic", action="store_false", help="Filter for non-toxic users")
     parser.add_argument("--n", required=True, type=int, help="Number of examples to sample")
     parser.add_argument(
         "--games", type=Path, default=None,
@@ -71,11 +63,11 @@ def parse_args():
     )
     parser.add_argument(
         "--step02-dir", type=Path, default=None,
-        help="Path to step02's output directory (default: step04-output/review_lang=<lang>)",
+        help="Path to step02's output directory (default: step02-output/review_lang=<lang>)",
     )
     parser.add_argument(
         "--step04-dir", type=Path, default=None,
-        help="Path to step04's output directory (default: step04-output-v2 or step04-output; "
+        help="Path to step04's output directory (default: step04-output-v2/review_lang=<lang>; "
         "empty sentiment_score column if that path doesn't exist)",
     )
     parser.add_argument(
@@ -84,22 +76,14 @@ def parse_args():
         "(default: step03-output/<lang>/results/classified_toxic.parquet; "
         "empty topic column if that path doesn't exist)",
     )
-    parser.add_argument(
-        "--user-labels", type=Path, default=None,
-        help="Path to step06's toxic_user_labels.parquet",
-    )
-    parser.add_argument("--min-sentiment", type=float, default=None, help="Minimum sentiment score (inclusive, nlptown 1.0-5.0 scale)")
-    parser.add_argument("--max-sentiment", type=float, default=None, help="Maximum sentiment score (inclusive, nlptown 1.0-5.0 scale)")
-    rec_group = parser.add_mutually_exclusive_group(required=False)
-    rec_group.add_argument("--recommended", dest="is_recommended", action="store_true", default=None, help="Filter for recommended reviews (is_recommended == True)")
-    rec_group.add_argument("--not-recommended", dest="is_recommended", action="store_false", help="Filter for not-recommended reviews (is_recommended == False)")
     parser.add_argument("--contains", default=None, help="Substring the review text must contain (case-insensitive)")
     parser.add_argument("--game-tag", default=None, help="Game must have this popular_tag (case-insensitive)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for sampling")
-    parser.add_argument("--light-mode", action="store_true", default=True, help="Filter data while reading to drastically reduce RAM usage (default: True)")
+    parser.add_argument("--light-mode", action="store_true", help="Filter data while reading to drastically reduce RAM usage")
     parser.add_argument(
         "--output", type=Path, default=None,
-        help="Path to write the sampled examples CSV to",
+        help="Path to write the sampled examples CSV to "
+        "(default: ../../steam-data/examples/<toxic|non_toxic>_<lang>.csv)",
     )
     return parser.parse_args()
 
@@ -112,22 +96,7 @@ def main():
     step02_dir = args.step02_dir or defaults["step02_dir"]
     step04_dir = args.step04_dir or defaults["step04_dir"]
     step03_results = args.step03_results or defaults["step03_results"]
-    user_labels = args.user_labels or defaults["user_labels"]
-
-    label_parts = []
-    if args.venn_set:
-        label_parts.append(args.venn_set)
-    elif args.toxic is not None:
-        label_parts.append("toxic" if args.toxic else "non_toxic")
-    if args.user_toxic is not None:
-        label_parts.append("user_toxic" if args.user_toxic else "user_non_toxic")
-    if args.is_recommended is not None:
-        label_parts.append("rec" if args.is_recommended else "notrec")
-    if args.min_sentiment is not None or args.max_sentiment is not None:
-        s_min = f"{args.min_sentiment}".replace(".", "p") if args.min_sentiment is not None else "any"
-        s_max = f"{args.max_sentiment}".replace(".", "p") if args.max_sentiment is not None else "any"
-        label_parts.append(f"sent_{s_min}_{s_max}")
-    selector_label = "_".join(label_parts) if label_parts else "all"
+    selector_label = args.venn_set or ("toxic" if args.toxic else "non_toxic")
     output = args.output or Path(f"../../steam-data/examples/{selector_label}_{args.lang}.csv")
 
     if not step04_dir.exists():
@@ -141,11 +110,6 @@ def main():
         lang=args.lang,
         toxic=args.toxic if args.venn_set is None else None,
         venn_set=args.venn_set,
-        user_toxic=args.user_toxic,
-        min_sentiment=args.min_sentiment,
-        max_sentiment=args.max_sentiment,
-        is_recommended=args.is_recommended,
-        user_labels_path=user_labels,
         n=args.n,
         games_path=games_path,
         step02_dir=step02_dir,
